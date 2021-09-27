@@ -1,5 +1,7 @@
 # Paginator
 
+[![Clojars Project](https://img.shields.io/clojars/v/org.clojars.roklenarcic/paginator.svg)](https://clojars.org/org.clojars.roklenarcic/paginator)
+
 A lot of APIs solve the problem with large lists by paging. A complex scenario where you want
 to load all pages of one entity, then loading all pages of another type of entity, concurrently,
 while also limiting max concurrency, is not an easy thing to code. This is why this library exists.
