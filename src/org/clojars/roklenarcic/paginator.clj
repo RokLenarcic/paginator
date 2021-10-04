@@ -1,42 +1,27 @@
 (ns org.clojars.roklenarcic.paginator
   "Paginator enables paginating multiple concurrent items with batching."
   (:require [clojure.core.async :refer [chan go-loop >! close! onto-chan! <!! alts!] :as async]
-            [org.clojars.roklenarcic.paginator.impl :as impl]
-            [org.clojars.roklenarcic.paginator.protocols :as proto])
+            [org.clojars.roklenarcic.paginator.impl :as impl])
   (:import (clojure.lang PersistentQueue)))
 
-(defmulti get-items
-          "Multimethod that should perform a request for a specific :entity-type and return a response."
-          (fn [params paging-states] (:entity-type (first paging-states))))
+(defn merge-result
+  "Updates paging state with result map. Anything in the result map overwrites current
+   values in paging-state. The exception are keys:
+   - :page (which increases by 1)
+   - :items values are combined"
+  [paging-state result]
+  (impl/merge-ps result paging-state))
 
-(defn result-parser1
-  "Returns a proto/ResultParser that expects that response has 1 item and 1 cursor
+(defn merge-results
+  "Updates paging states with the results, see merge-result fn."
+  [paging-states results]
+  (let [m (reduce (fn [m r] (assoc m [(:entity-type r) (:id r)] r)) {} results)]
+    (mapv #(merge-result % (m [(:entity-type %) (:id %)])) paging-states)))
 
-  - items-fn takes a batch-result returns a collection of items for the paging-state
-  - cursor-fn takes a batch-result returns a cursor
-  - new-entities-fn takes a batch-result and returns coll of paging states for new entities, defaults
-  to a function that always returns []"
-  ([items-fn cursor-fn] (result-parser1 items-fn cursor-fn (constantly [])))
-  ([items-fn cursor-fn new-entities-fn]
-   (reify proto/BatchParser
-     (-cursors [this batch-result]
-       (constantly (cursor-fn batch-result)))
-     (-items [this batch-result]
-       (constantly (items-fn batch-result)))
-     (-new-entities [this batch-result]
-       (new-entities-fn batch-result)))))
-
-(defn result-parser
-  "Returns a proto/ResultParser, the functions given have the same argument list as
-   the protocol."
-  [items-fn cursor-fn new-entities-fn]
-  (reify proto/BatchParser
-    (-cursors [this batch-result]
-      (cursor-fn batch-result))
-    (-items [this batch-result]
-      (items-fn batch-result))
-    (-new-entities [this batch-result]
-      (new-entities-fn batch-result))))
+(defn entity-type
+  "It returns entity-type of the first paging-state in the collection of paging states"
+  [paging-states]
+  (:entity-type (first paging-states)))
 
 (defn with-batcher
   "Add batching configuration to engine map.
@@ -68,28 +53,16 @@
   [engine concurrency]
   (assoc engine :max-concurrency concurrency))
 
-(defn with-items-fn
-  [engine get-items-fn]
-  (assoc engine :get-items-fn get-items-fn))
-
 (defn engine
   "Defines a minimal map describing the paging engine. Use with-* to add more options.
 
   async-fn is a fn that takes a no-arg fn and runs it asynchronously, defaults to future-call
 
-  get-items-fn is a fn of (params, paging-states) that should return some sort of a response,
-  that will be parsed by result-parser, defaults to get-items multimethod
-
-  result-parser is a protocols/ResultParser instance
-
   Default buffer size for result channel is 100.
   Default concurrency is 1, see with-concurrency docs for meaning of this setting."
-  ([result-parser] (engine result-parser get-items))
-  ([result-parser get-items-fn] (engine result-parser get-items-fn future-call))
-  ([result-parser get-items-fn async-fn]
-   (-> {:async-fn async-fn
-        :parser result-parser}
-       (with-items-fn get-items-fn)
+  ([] (engine future-call))
+  ([async-fn]
+   (-> {:async-fn async-fn}
        (with-batcher false)
        (with-result-buf 100)
        (with-concurrency 1))))
@@ -98,9 +71,13 @@
   "Returns a channel for inbound paging state maps and a channel where the
   paging state maps are returns with additional keys of :items or :exception.
 
-  They are returned in the map as :in and :out keys respectively."
-  [engine params]
-  (let [e (impl/init-engine engine params)]
+  They are returned in the map as :in and :out keys respectively.
+
+  get-pages-fn takes paging-states coll and returns new updated paging-states coll,
+  use merge-result, merge-results functions to assist in updating paging states correctly with new
+  items."
+  [engine get-pages-fn]
+  (let [e (impl/init-engine engine get-pages-fn)]
     (go-loop [{:keys [ch-out ch-in ch-result] :as engine} e]
       ;; run from queue is the only queue -> actually executing path
       (if-let [new-e (impl/run-from-queue! engine)]
@@ -143,8 +120,8 @@
 (defn paginate!
   "Loads pages with given entity-id pairs. Returns a vector of paging states.
   Any exceptions are rethrown. entity-ids should be a coll of pairs of entity-type and id."
-  [engine params entity-ids]
-  (let [{result-ch :out ch-in :in} (paginate*! engine params)
+  [engine get-pages-fn entity-ids]
+  (let [{result-ch :out ch-in :in} (paginate*! engine get-pages-fn)
         _ (onto-chan! ch-in (mapv #(paging-state (first %) (second %)) entity-ids) true)
 
         result-coll (<!! (async/into [] result-ch))]
@@ -154,15 +131,15 @@
 (defn paginate-coll!
   "Loads pages with given IDs. Returns a vector of vectors where each subvector
   represents items for the id at that index in input parameters. Any exceptions are rethrown."
-  [engine params entity-type ids]
+  [engine get-pages-fn entity-type ids]
   (let [lookup (reduce #(assoc %1 [(:entity-type %2) (:id %2)] %2)
                        {}
-                       (paginate! engine params (map #(vector entity-type %) ids)))]
+                       (paginate! engine get-pages-fn (map #(vector entity-type %) ids)))]
     (mapv #(:items (lookup [entity-type %])) ids)))
 
 (defn paginate-one!
   "Starts pagination on a single entity and returns items. It expects that there is only 1 result.
 
-  Params is merged into paging states map."
-  [engine params entity-type id]
-  (-> (paginate! engine params [[entity-type id]]) first :items))
+  get-item-fn should take 1 parameter, the sole paging state, with entity-type ::singleton, id nil"
+  [engine get-page-fn]
+  (-> (paginate! engine (fn [[s]] (get-page-fn s)) [[::singleton nil]]) first :items))

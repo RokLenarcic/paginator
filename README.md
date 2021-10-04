@@ -8,6 +8,8 @@ while also limiting max concurrency, is not an easy thing to code. This is why t
 
 You interact with this library by importing `[org.clojars.roklenarcic.paginator :as p]`.
 
+Examples are at the end.
+
 ## Pagination state
 
 This library uses a core async loop that takes paging state maps via input channel
@@ -33,11 +35,23 @@ paging is considered finished and the state map will be placed into the output c
 
 ## Paginate
 
-The pagination is done via `p/paginate*!`. It takes an `engine` and `params`. Engine will be
-described later. Params can be anything and it will be passed to your page loading function.
+The pagination is done via `p/paginate*!`. It takes an `engine` and `get-pages-fn`. Engine will be
+described later. **The pages fn should be a function that takes a collection of paging states (as per engine's batching settings), does whatever
+is necessary to load the data for them, then return a new collection of paging states (or a single paging state).**
+
+Usually that means performing a request of some sort, updating the `:items` vector in each paging state with additional
+items, and updating `:page-cursor` (or setting it to `nil` if done). As the default batching size is `1`, the input
+collection of paging-state will usually have just one item.
+
+**If is possible return additional paging-states, thereby introducing additional entities to page. Same for removing
+paging-states.**
 
 ```clojure
-(let [{:keys [out in]} (p/paginate*! engine params)]
+(let [{:keys [out in]} (p/paginate*! engine (fn [[paging-state]]
+                                              ...
+                                              (-> paging-state
+                                                  (update :items into (more-stuff))
+                                                  (assoc :page-cursor next-page))))]
   (async/onto-chan! in paging-states)
   ...)
 ```
@@ -48,8 +62,38 @@ get paging states with `:items` and potentially `:exception`, an exception that 
 The reason why `in` and `out` channels are used is because you can use them to chain together
 multiple pagination processes.
 
-But most of the time you'll want to use a collection for input and the output to be collected
-into a collection.
+### Merging helpers
+
+To help with merging your new data with existing paging states there are helpers provided:
+
+- `merge-result` merges one paging-state with one map of new data
+- `merge-results` merges a collection of paging states with a collection of maps with new data
+
+The function that merges collections will update data by matching new data maps with existing
+paging-states by matching `:entity-type` and `:id`. Any paging-states without a matching new data
+map will be marked done by setting `:page-cursor` to nil.
+
+The merge itself follows the rules:
+- `:items` key is merged by concatenating
+- `:pages` is always increased by 1
+- `:page-cursor` is always set whether the incoming data has the key or not
+- the rest of the keys are merged into paging state as is
+
+Let's rewrite previous example with this helper:
+
+```clojure
+(let [{:keys [out in]} (p/paginate*! engine (fn [[paging-state]]
+                                              ...
+                                              (p/merge-state paging-state {:items (more-stuff)
+                                                                           :page-cursor next-page})))]
+  (async/onto-chan! in paging-states)
+  ...)
+```
+
+### Paging helper
+
+Instead of using channels directly, you can also use one of the convenience wrappers that 
+will put you input onto input channel as paging states and block and collect output paging states into a collection.
 
 To do that, use one of the convenience wrappers:
 
@@ -62,9 +106,11 @@ This wrapper adds to base `paginate*!`:
 - throws an exception if a page state has an exception
 
 ```clojure
-(let [states (paginate! engine {} [[:projects-by-person 1] 
-                                   [:projects-by-person 2] 
-                                   [:projects-by-person 3]])]
+(let [states (paginate! engine
+                        get-pages-fn 
+                        [[:projects-by-person 1] 
+                         [:projects-by-person 2] 
+                         [:projects-by-person 3]])]
   states)
 ```
 
@@ -82,31 +128,17 @@ what you want. Besides what `paginate!` does, this also:
 
 This wrapper is like `paginate-coll` but it operates on a single paging state and returns a single vector of results.
 
+Instead of `get-pages-fn` it takes `get-page-fn`, a function that will take a single paging state and return a single
+updated paging state.
+
 ## Pagination engine
 
 An engine is a map that describes aspects of your paging process.
 
 ```clojure
-(p/engine result-parser get-items-fn async-fn)
+(p/engine)
+(p/engine async-fn)
 ```
-
-Only the result-parser is the required parameter.
-
-### Result parser
-
-Result parser is an object of `org.clojars.roklenarcic.paginator.protocols/ResultParser`.
-
-There's convenience wrappers `p/result-parser` and `p/result-parser1` that you will want to use.
-
-Result parser specifies how the responses generated by your get items function parse into 3 things:
-- map of `[entity-type id]` to cursor to next page for each entity being paged
-- map of `[entity-type id]` to coll of items for each entity being paged
-- any new entities that we want to introduce to paging process (or paging process result)
-
-### Get Items Fn
-
-This defaults to `p/get-items` multimethod, but it can be any method that takes
-a `params` map and `paging-states`, a coll of paging states, a batch.
 
 ## async-fn
 
@@ -117,7 +149,7 @@ Defaults to `clojure.core/future-call`. You can use this to provide an alternati
 ## with-batcher
 
 Sets batching configuration for the engine. As paging states are queued up for processing they are
-arranged into batches. The `get-items-fn` will be called with one such batch each time.
+arranged into batches. The `get-pages-fn` will be called with one such batch each time.
 
 Each paging state queued up for (more) processing will be evaluated with `batch-fn` which should return
 the batch ID for the paging stage. It will be added to that batch. 
@@ -138,12 +170,8 @@ Sets a different buffer size on output channel, the default being 100.
 
 ## with-concurrency
 
-Sets maximum concurrency for paged get-items calls. Engine will not queue additional
-`get-items-fn` calls if maximum concurrency is reached. Default is 1.
-
-## with-items-fn
-
-Sets `get-items-fn` for the engine.
+Sets maximum concurrency for paged get-pages calls. Engine will not queue additional
+`get-pages-fn` calls if maximum concurrency is reached. Default is 1.
 
 ## Linear pagination with next page links
 
@@ -157,21 +185,16 @@ In the result you'll get `x-ms-continuationtoken` header. Provide it when callin
 
 This is a fairly common scenario in paging results.
 
-If `p` is required of `org.clojars.roklenarcic.paginator`.
+If `p` is required as `org.clojars.roklenarcic.paginator`.
 
 ```clojure
-
-
-(defmethod p/get-items ::projects
-  [{:keys [auth-token]} states]
-  (get-projects auth-token (-> states first :page-cursor)))
-
-(p/paginate-one!
-  (p/engine (p/result-parser1
-              (comp :items :body)
-              #(get-in % [:headers "x-ms-continuationtoken"])))
-  {:auth-token "MY AUTH"} 
-  ::projects nil)
+(p/paginate-one! (p/engine)
+                 (fn [{:keys [page-cursor] :as s}]
+                   (-> s
+                       (p/merge-result
+                         (let [resp (get-projects "MY AUTH" page-cursor)]
+                           {:page-cursor (get-in resp [:headers "x-ms-continuationtoken"])
+                            :items (-> resp :body :items)})))))
 
 ```
 
@@ -183,54 +206,53 @@ and a `count` (or `page-size`) parameter. It then returns `count` items from `of
 The offset itself can be a number of items or a number of pages. It doesn't make a difference to a paging algorithm. 
 
 ```clojure
-
-(defmethod p/get-items ::projects-offset
-  [{:keys [auth-token]} states]
-  (get-projects-with-offset auth-token (-> states first :page-cursor)))
-
 (p/paginate-one!
-   (p/engine (p/result-parser1
-               (comp :items :body)
-               (comp :offset :body)))
-   {:auth-token "MY AUTH"} ::projects-offset nil)
+  (p/engine)
+  (fn [{:keys [page-cursor] :as s}]
+    (-> s
+        (p/merge-result
+          (let [resp (get-projects-with-offset "MY AUTH" page-cursor)]
+            {:page-cursor (get-in resp [:body :offset])
+             :items (get-in resp [:body :items])})))))
 ```
 
-## Swapping control to call-site
+## Making a more generic get-pages-fn function
 
-In the previous examples, the operation done was selected by `:entity-type` in the
-paging states and the implementations provided by defining the multimethod.
+In the previous examples, the function used was specific to a callsite. But sometimes the
+paging and items logic is general for most API calls, and we want to factor that out.
 
-We can change this to specify a function at the spot where we call
-paginate. We can provide a fn to `engine` constructor to use instead of get-items 
-multimethod.
-
-If we have a generic request function which varies to operation based on parameters we
-might want to specify them at the callsite.
+What we need is a function that will return a function.
 
 Imagine you're working with Bitbucket REST API. Some API calls will
 return a body with two keys `:values` and `:next` as a way of pagination. And there are many such
-functions.
+functions, so we want avoid repetition.
 
 ```clojure
 (defn api-call [auth-token method url params]
   ...)
 
-(def paged-api
-  (p/engine
-    (p/result-parser1 (comp :values :body) (comp :next :body))
-    (fn [[auth-token method url params] paging-states]
-      (if-let [cursor (-> paging-states first :page-cursor)]
-        (api-call auth-token :get cursor {})
+(defn api-caller
+  [auth-token method url params]
+  (fn [{:keys [page-cursor] :as s}]
+    (p/merge-result
+      s
+      (if page-cursor
+        (api-call auth-token :get page-cursor {})
         (api-call auth-token method url params)))))
 
-(p/paginate-one! paged-api ["auth-token" :get "/projects" {}] ::projects2 nil)
+(p/paginate-one!
+  (p/engine)
+  (api-caller "X" :get "/projects" {}))
 ```
+
 ## Emitting new entities or paging states during the process
 
 Imagine you paginate accounts, and then you want to paginate users, and then paginate their emails.
 You want to generate new paging states for accounts and return them into process. But for emails you want to
 return them into the results stream. **This won't work with `paginate-one!` and `paginate-coll!` because
 those assume that the input and output entities are the same**.
+
+It is trivial to add extra data to paging states and to create new paging states for paginating on subelements.
 
 Here's an example from tests:
 
@@ -253,29 +275,25 @@ Here's an example from tests:
             :offset (when (< (+ 2 p) (count v))
                       (+ 2 p))}}))
 
-;; mock response functions
-(defmethod p/get-items
-  ::accounts
-  [params [{:keys [page-cursor]}]]
-  (assoc (get-from-vector accounts page-cursor)
-    :resp-type ::accounts))
+(defn v-result [s v]
+  (p/merge-result s {:page-cursor (-> v :body :offset) :items (-> v :body :items)}))
 
-(defmethod p/get-items
-  ::account-repos
-  [params [{:keys [page-cursor id]}]]
-  (get-from-vector (repositories id) page-cursor))
+(defn get-accounts
+  [{:keys [page-cursor] :as s}]
+  (let [resp (get-from-vector accounts page-cursor)]
+    (cons (v-result s resp)
+          (->> resp :body :items (map #(p/paging-state ::account-repos (:account-name %)))))))
 
-(def e
-  (p/engine
-    (p/result-parser1
-      (comp :items :body)
-      (comp :offset :body)
-      (fn [resp]
-        (case (:resp-type resp)
-          ::accounts (map #(p/paging-state ::account-repos (:account-name %)) (-> resp :body :items))
-          nil)))))
+(defn get-account-repos
+  [{:keys [page-cursor id] :as s}]
+  (v-result s (get-from-vector (repositories id) page-cursor)))
 
-(p/paginate! e {} [[::accounts nil]])
+(p/paginate! (p/engine)
+             (fn [paging-states]
+               (case (p/entity-type paging-states)
+                 ::accounts (get-accounts (first paging-states))
+                 ::account-repos (get-account-repos (first paging-states))))
+             [[::accounts nil]])
 =>
 [{:id "B", :entity-type ::account-repos, :pages 1, :items [], :page-cursor nil}
  {:id nil,

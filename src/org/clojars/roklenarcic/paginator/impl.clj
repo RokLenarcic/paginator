@@ -1,6 +1,5 @@
 (ns org.clojars.roklenarcic.paginator.impl
-  (:require [clojure.core.async :refer [go <! >! >!! chan promise-chan]]
-            [org.clojars.roklenarcic.paginator.protocols :as proto]))
+  (:require [clojure.core.async :refer [go <! >! >!! chan promise-chan]]))
 
 (defn swap-xf!
   "A transducer that runs f on atom* for each item seen."
@@ -22,26 +21,40 @@
   [engine]
   (< @(:items-in-runner engine) (:max-concurrency engine)))
 
-(defn update-existing-ps
-  "Updates an existing pagestate map with results."
-  [{:keys [parser]} result page-states]
-  (let [cursors (proto/-cursors parser result)
-        items (proto/-items parser result)]
-    (mapv
-      (fn [{:keys [entity-type id] :as page-state}]
-        (-> page-state
-            (update :pages inc)
-            (update :items into (remove nil?) (items [entity-type id]))
-            (assoc :page-cursor (cursors [entity-type id]))))
-      page-states)))
+(defn merge-ps
+  "Updates an existing pagestate map with results. It will specially handle
+  :pages, :items, :page-cursor, the rest of it is merged into paging-state as is."
+  [result paging-state]
+  (if result
+    (-> paging-state
+        (update :pages inc)
+        (update :items into (remove nil?) (:items result))
+        (assoc :page-cursor (:page-cursor result))
+        (merge (dissoc result :pages :items :page-cursor)))
+    ;; no result... but there should be some
+    (assoc paging-state :page-cursor nil)))
 
-(defn run!! [{:keys [params get-items-fn items-in-runner items-in-process parser] :as engine} paging-states]
+(defn paging-state?
+  "Returns true if the map looks like a paging state with cursor."
+  [s]
+  (and (map? s) (every? #(contains? s %) [:id :entity-type :items])))
+
+(defn mark-invalid-state
+  "If state is invalid, mark it with an exception"
+  [s]
+  (if (paging-state? s)
+    s
+    (assoc (if (map? s) s {})
+      :exception (ex-info "Returned value doesn't seem to be a paging state, must have keys [:id :entity-type :items]."
+                          {:invalid-state s})
+      :page-cursor nil)))
+
+(defn run!! [{:keys [get-pages-fn items-in-runner items-in-process]} paging-states]
   (try
-    (let [result (get-items-fn params paging-states)
-          new-states (proto/-new-entities parser result)
-          returned-states (vec (concat (update-existing-ps engine result paging-states) new-states))]
-      (swap! items-in-process + (count new-states))
-      returned-states)
+    (let [returned-states (get-pages-fn paging-states)
+          returned-states (if (map? returned-states) [returned-states] (vec returned-states))]
+      (swap! items-in-process + (- (count returned-states) (count paging-states)))
+      (mapv mark-invalid-state returned-states))
     (catch Exception e
       (mapv #(assoc % :exception e :page-cursor nil) paging-states))
     (finally
@@ -88,12 +101,12 @@
   If input is closed+no tasks in the process."
   (and (nil? (:ch-in engine)) (zero? @(:items-in-process engine))))
 
-(defn init-engine [engine params]
+(defn init-engine [engine get-pages-fn]
   (let [items-in-runner (atom 0)
         items-in-process (atom 0)]
     (assoc engine :items-in-runner items-in-runner
                   :items-in-process items-in-process
-                  :params params
+                  :get-pages-fn get-pages-fn
                   :ch-in (chan 15 (swap-xf! items-in-process inc))
                   :ch-out (chan (:buf-size engine) (swap-xf! items-in-process dec))
                   ;; always do increase first so both atoms cannot be 0 between operations

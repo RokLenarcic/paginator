@@ -25,46 +25,46 @@
             :offset (when (< (+ 2 offset) (count projects))
                       (+ 2 offset))}}))
 
-(defmethod p/get-items ::projects
-  [{:keys [auth-token]} states]
-  (get-projects auth-token (-> states first :page-cursor)))
-
-(defmethod p/get-items ::projects-offset
-  [{:keys [auth-token]} states]
-  (get-projects-with-offset auth-token (-> states first :page-cursor)))
-
 (deftest continuation-token-test
   (is (= projects
-         (p/paginate-one!
-           (p/engine (p/result-parser1
-                       (comp :items :body)
-                       #(get-in % [:headers "x-ms-continuationtoken"])))
-           {:auth-token "MY AUTH"} ::projects nil))))
+         (p/paginate-one! (p/engine)
+                          (fn [{:keys [page-cursor] :as s}]
+                            (-> s
+                                (p/merge-result
+                                  (let [resp (get-projects "MY AUTH" page-cursor)]
+                                    {:page-cursor (get-in resp [:headers "x-ms-continuationtoken"])
+                                     :items (-> resp :body :items)}))))))))
 
 (deftest offset-test
   (is (= projects
          (p/paginate-one!
-           (p/engine (p/result-parser1
-                       (comp :items :body)
-                       (comp :offset :body)))
-           {:auth-token "MY AUTH"} ::projects-offset nil))))
+           (p/engine)
+           (fn [{:keys [page-cursor] :as s}]
+             (-> s
+                 (p/merge-result
+                   (let [resp (get-projects-with-offset "MY AUTH" page-cursor)]
+                     {:page-cursor (get-in resp [:body :offset])
+                      :items (get-in resp [:body :items])}))))))))
 
 
 (defn api-call [auth-token method url params]
   (let [offset (or (some->> url (re-find #"\?offset=(.*)") second Long/parseLong)
                    0)]
-    {:body {:values (take 2 (drop offset projects))
-            :next (when (< (+ 2 offset) (count projects))
-                    (str "/projects?offset=" (+ 2 offset)))}}))
+    {:page-cursor (when (< (+ 2 offset) (count projects))
+                    (str "/projects?offset=" (+ 2 offset)))
+     :items (take 2 (drop offset projects))}))
 
-(def paged-api
-  (p/engine
-    (p/result-parser1 (comp :values :body) (comp :next :body))
-    (fn [[auth-token method url params] paging-states]
-      (if-let [cursor (-> paging-states first :page-cursor)]
-        (api-call auth-token :get cursor {})
+(defn api-caller
+  [auth-token method url params]
+  (fn [{:keys [page-cursor] :as s}]
+    (p/merge-result
+      s
+      (if page-cursor
+        (api-call auth-token :get page-cursor {})
         (api-call auth-token method url params)))))
 
 (deftest api-call-test
   (is (= projects
-         (p/paginate-one! paged-api ["X" :get "/projects" {}] ::projects2 nil))))
+         (p/paginate-one!
+           (p/engine)
+           (api-caller  "X" :get "/projects" {})))))

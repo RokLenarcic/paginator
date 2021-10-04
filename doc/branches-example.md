@@ -87,61 +87,34 @@ Here's some code:
        :request-method :post
        :form-params {:query q}})))
 
-(defmethod p/get-items :project-branches [params paging-states]
-  (let [requested-page (:page-cursor (first paging-states) 0)]
-    {:page requested-page
-     :projects (get-in (branches (:auth-token params) (map :id paging-states) requested-page)
-                       [:body :data :projects :nodes])}))
+(defn project-branches [auth-token paging-states]
+  (let [page (:page-cursor (first paging-states) 0)
+        b (branches auth-token (map :id paging-states) page)
+        nodes (get-in b [:body :data :projects :nodes])
+        results (mapv (fn [{:keys [id repository] :as node}]
+                        {:id id
+                         :entity-type :project-branches
+                         :project (update node :repository dissoc :branchNames)
+                         :page-cursor (when (>= (count (:branchNames repository)) branches-per-page)
+                                        (inc page))
+                         :items (:branchNames repository)})
+                      nodes)]
+    (p/merge-results paging-states results)))
 
-(defn extract-project
-  "Separate project out, put it into the page-state map and finalize it by
-  setting page-cursor to nil."
-  [project]
-  (-> (p/paging-state :project (:id project))
-      (assoc :project (update project :repository dissoc :branchNames))
-      (assoc :page-cursor nil)))
-
-(def e2 (-> (p/engine
-              (p/result-parser
-                (fn [{:keys [projects]}]
-                  (into {} (map (fn [{:keys [id repository]}] [[:project-branches id] (:branchNames repository)])) projects))
-                (fn [{:keys [page projects]}]
-                  (into {}
-                        (map (fn [{:keys [id repository]}]
-                               [[:project-branches id]
-                                (when (>= (count (:branchNames repository)) branches-per-page)
-                                  (inc page))]))
-                        projects))
-                (fn [{:keys [page projects]}]
-                  (when (= 0 page) (mapv extract-project projects)))))
-            (p/with-concurrency 1)
+(def e2 (-> (p/engine)
+            (p/with-concurrency 5)
             (p/with-batcher false ids-per-page :page-cursor)))
 
 
 (p/paginate!
   e2
-  {:auth-token "521aaxxxxxx7befc7828"}
+  #(project-branches "521aaxxxxxx7befc7828" %)
   (map #(vector :project-branches %) ids))
 ```
 
-### get-items
+### project-branches
 
-The get-items function returns what the GitLab returns, but it also returns which page was requested, because GitLab's
-response doesn't indicate that at all. So we help ourselves by adding current page requested to the response ourselves.
-
-### Result parser, items-fn
-
-You can see that items-fn returns just a straight-forward map of `[:project-branches project-id]` -> branches.
-
-### Result parser, cursor-fn
-
-If the number of returned branches matches the maximum then there are more pages, so we return `(inc page)` for the cursor.
-
-### Result parser, new-entities-fn
-
-This is where we "export" project information separated from branches lists. When loading page 0 we export
-returned project data (sans branches) as a new paging state with `:project` entity type. **We set `:page-cursor`
-to `nil` to indicate that no further processing is needed**.
+It returns updated paging-states collection, with extra `:project` key with all the project related information
 
 ### with-concurrency
 
@@ -176,32 +149,52 @@ is twice lower than when concurrency is 1.
 
 ```clojure
 [....
- {:id "gid://gitlab/Project/29918178",
+ {:id "gid://gitlab/Project/29917873",
   :entity-type :project-branches,
   :pages 1,
-  :items ["edit-form-flicker-bug"
-          "fix-default-sort-order"
-          "feature/sql-nested-queries"
-          "develop"
-          "feature/form-create"
-          "datetime-fixes-and-extensions"
-          "sandbox"
-          "title-fn-fix"
-          "bugfix-read-only-lambda"
-          "style-fix"
-          "additional-date-utils"],
-  :page-cursor nil},
- {:id "gid://gitlab/Project/28285063",
-  :entity-type :project,
-  :pages 0,
-  :items [],
-  :project {:id "gid://gitlab/Project/28285063",
-            :name "A public project",
+  :items ["master"],
+  :page-cursor nil,
+  :project {:id "gid://gitlab/Project/29917873",
+            :name "Awesome Hacking",
             :visibility "private",
-            :httpUrlToRepo "https://gitlab.com/rok.lenarcic1/a-public-project.git",
-            :fullPath "rok.lenarcic1/a-public-project",
-            :namespace {:id "gid://gitlab/Namespace/12788889"},
-            :repository {:rootRef "main"}},
+            :httpUrlToRepo "https://gitlab.com/rtg41000/group8/Awesome-Hacking.git",
+            :fullPath "rtg41000/group8/Awesome-Hacking",
+            :namespace {:id "gid://gitlab/Group/13505299"},
+            :repository {:rootRef "master"}}}
+ {:id "gid://gitlab/Project/29917932",
+  :entity-type :project-branches,
+  :pages 1,
+  :items ["dependabot/npm_and_yarn/socket.io-2.4.1"
+          "gg/docz"
+          "gh-pages"
+          "cp/remove-inner-shadow-on-focused-inputs"
+          "next"
+          "ad/tsconfig-flag"
+          "ad/reduce-find-dom-node"
+          "develop"
+          "excavator/policy-bot-oss-shadow"
+          "al/motion"
+          "johnlee/modern-colors-non-core"
+          "release/1.x"
+          "release/2.x"
+          "ad/fix-classes-constants-rule"
+          "mw/dateinput-cal-focus"
+          "ad/fix-webpack"
+          "release/3.17.x"
+          "ad/form-component"
+          "tm/css-variables"
+          "dependabot/npm_and_yarn/postcss-8.2.10"
+          "v4"
+          "ad/popover2props-compatibility"
+          "query-list-create-item"],
+  :page-cursor nil,
+  :project {:id "gid://gitlab/Project/29917932",
+            :name "Blueprint",
+            :visibility "private",
+            :httpUrlToRepo "https://gitlab.com/rtg41000/group8/blueprint.git",
+            :fullPath "rtg41000/group8/blueprint",
+            :namespace {:id "gid://gitlab/Group/13505299"},
+            :repository {:rootRef "develop"}}}
   ....
 ```
 
