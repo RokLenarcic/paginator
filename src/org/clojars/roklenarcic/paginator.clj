@@ -115,7 +115,7 @@
           {:causes []}
           (filter :exception states))]
     (when-not (empty? (:causes ex-data))
-      (throw (ex-info "Exceptions occurred during paged calls" ex-data)))))
+      (throw (ex-info "Exceptions occurred during paged calls" ex-data (-> ex-data :causes first :exception))))))
 
 (defn paginate!
   "Loads pages with given entity-id pairs. Returns a vector of paging states.

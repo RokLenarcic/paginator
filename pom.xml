@@ -4,7 +4,7 @@
   <packaging>jar</packaging>
   <groupId>org.clojars.roklenarcic</groupId>
   <artifactId>paginator</artifactId>
-  <version>0.2.0</version>
+  <version>0.2.1</version>
   <name>paginator</name>
   <dependencies>
     <dependency>
