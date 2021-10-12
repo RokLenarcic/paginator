@@ -49,6 +49,44 @@
   [{:keys [page-cursor id] :as s}]
   (v-result s (get-from-vector (repositories id) page-cursor)))
 
+(deftest expanding-test
+  (testing "expands into multiple paging states"
+    (is (= [{:entity-type :x
+             :id 1
+             :items []
+             :page-cursor 1
+             :pages 1}
+            (p/paging-state :account 1)
+            (p/paging-state :account 2)
+            (p/paging-state :account 3)
+            (p/paging-state :account 5)]
+           (p/merge-expand-result
+             (p/paging-state :x 1)
+             {:items [1 2 3 5]
+              :page-cursor 1}
+             (map #(p/paging-state :account %))))))
+  (testing "multiple expand"
+    (is (= [{:entity-type :x
+             :id 1
+             :items []
+             :page-cursor nil
+             :pages 1}
+            (p/paging-state :account 5)
+            (p/paging-state :account 6)
+            {:entity-type :x
+             :id 2
+             :items []
+             :page-cursor nil
+             :pages 1}
+            (p/paging-state :account 0)
+            (p/paging-state :account 1)]
+           (p/merge-expand-results
+             [(p/paging-state :x 1) (p/paging-state :x 2)]
+             [{:id 2 :entity-type :x :items [0 1]}
+              {:id 1 :entity-type :x :items [5 6]}
+              {:id 3 :entity-type :y :items [15 15]}]
+             (map #(p/paging-state :account %)))))))
+
 (deftest multi-entity-types-test
   (testing "multiple entity types"
     (is (= [{:entity-type ::account-repos

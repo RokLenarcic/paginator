@@ -12,6 +12,24 @@
   [paging-state result]
   (impl/merge-ps result paging-state))
 
+(defn merge-expand-result
+  "Updates paging state with result map. Returns a collection with
+  updated paging state + expansion.
+
+   Anything in the result map overwrites current values in paging-state.
+   The exception are keys:
+   - :page (which increases by 1)
+   - :items are not added, but instead they are processed through
+    transducer xf and added to the returned collection"
+  [paging-state result xf]
+  (into [(impl/merge-ps (when result (assoc result :items [])) paging-state)] xf (:items result)))
+
+(defn merge-expand-results
+  "Updates paging states with the results + expansions, see merge-expand-result."
+  [paging-states results xf]
+  (let [m (reduce (fn [m r] (assoc m [(:entity-type r) (:id r)] r)) {} results)]
+    (vec (mapcat #(merge-expand-result % (m [(:entity-type %) (:id %)]) xf) paging-states))))
+
 (defn merge-results
   "Updates paging states with the results, see merge-result fn."
   [paging-states results]
