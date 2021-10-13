@@ -15,7 +15,7 @@
                         (throw (ex-info "Too many concurrent threads" {})))
                       (Thread/sleep 10)
                       (.release semaphore)
-                      (p/merge-result s {:page-cursor (< (swap! pages inc) 100)}))]
+                      (p/merge-result {:page-cursor (< (swap! pages inc) 100)} s))]
       (is (= (repeat 10 []) (p/paginate-coll! (p/with-concurrency engine 5) get-pages :any (range 10))))
       (is (thrown? Exception (p/paginate-coll! (p/with-concurrency engine 10) get-pages :any (range 100)))))))
 
@@ -37,7 +37,7 @@
                       (+ 2 p))}}))
 
 (defn v-result [s v]
-  (p/merge-result s {:page-cursor (-> v :body :offset) :items (-> v :body :items)}))
+  (p/merge-result {:page-cursor (-> v :body :offset) :items (-> v :body :items)} s))
 
 (defn get-accounts
   [{:keys [page-cursor] :as s}]
@@ -61,9 +61,9 @@
             (p/paging-state :account 3)
             (p/paging-state :account 5)]
            (p/merge-expand-result
-             (p/paging-state :x 1)
              {:items [1 2 3 5]
               :page-cursor 1}
+             (p/paging-state :x 1)
              (map #(p/paging-state :account %))))))
   (testing "multiple expand"
     (is (= [{:entity-type :x
@@ -81,10 +81,10 @@
             (p/paging-state :account 0)
             (p/paging-state :account 1)]
            (p/merge-expand-results
-             [(p/paging-state :x 1) (p/paging-state :x 2)]
              [{:id 2 :entity-type :x :items [0 1]}
               {:id 1 :entity-type :x :items [5 6]}
               {:id 3 :entity-type :y :items [15 15]}]
+             [(p/paging-state :x 1) (p/paging-state :x 2)]
              (map #(p/paging-state :account %)))))))
 
 (deftest multi-entity-types-test
@@ -180,7 +180,7 @@
                                         (inc page))
                          :items (:branchNames repository)})
                       nodes)]
-    (p/merge-results paging-states results)))
+    (p/merge-results results paging-states)))
 
 (def e2 (-> (p/engine)
             (p/with-concurrency 5)

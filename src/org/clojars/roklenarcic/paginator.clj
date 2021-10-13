@@ -9,7 +9,7 @@
    values in paging-state. The exception are keys:
    - :page (which increases by 1)
    - :items values are combined"
-  [paging-state result]
+  [result paging-state]
   (impl/merge-ps result paging-state))
 
 (defn merge-expand-result
@@ -21,20 +21,20 @@
    - :page (which increases by 1)
    - :items are not added, but instead they are processed through
     transducer xf and added to the returned collection"
-  [paging-state result xf]
+  [result paging-state xf]
   (into [(impl/merge-ps (when result (assoc result :items [])) paging-state)] xf (:items result)))
 
 (defn merge-expand-results
   "Updates paging states with the results + expansions, see merge-expand-result."
-  [paging-states results xf]
+  [results paging-states xf]
   (let [m (reduce (fn [m r] (assoc m [(:entity-type r) (:id r)] r)) {} results)]
-    (vec (mapcat #(merge-expand-result % (m [(:entity-type %) (:id %)]) xf) paging-states))))
+    (vec (mapcat #(merge-expand-result (m [(:entity-type %) (:id %)]) % xf) paging-states))))
 
 (defn merge-results
   "Updates paging states with the results, see merge-result fn."
-  [paging-states results]
+  [results paging-states]
   (let [m (reduce (fn [m r] (assoc m [(:entity-type r) (:id r)] r)) {} results)]
-    (mapv #(merge-result % (m [(:entity-type %) (:id %)])) paging-states)))
+    (mapv #(merge-result (m [(:entity-type %) (:id %)]) %) paging-states)))
 
 (defn entity-type
   "It returns entity-type of the first paging-state in the collection of paging states"

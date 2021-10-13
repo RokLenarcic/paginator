@@ -66,8 +66,8 @@ multiple pagination processes.
 
 To help with merging your new data with existing paging states there are helpers provided:
 
-- `merge-result` merges one paging-state with one map of new data
-- `merge-results` merges a collection of paging states with a collection of maps with new data
+- `merge-result` merges  one map of new data with one paging-state
+- `merge-results` merges a collection of maps with new data with a collection of paging states 
 
 The function that merges collections will update data by matching new data maps with existing
 paging-states by matching `:entity-type` and `:id`. Any paging-states without a matching new data
@@ -190,11 +190,11 @@ If `p` is required as `org.clojars.roklenarcic.paginator`.
 ```clojure
 (p/paginate-one! (p/engine)
                  (fn [{:keys [page-cursor] :as s}]
-                   (-> s
-                       (p/merge-result
-                         (let [resp (get-projects "MY AUTH" page-cursor)]
-                           {:page-cursor (get-in resp [:headers "x-ms-continuationtoken"])
-                            :items (-> resp :body :items)})))))
+                   (p/merge-result
+                     (let [resp (get-projects "MY AUTH" page-cursor)]
+                       {:page-cursor (get-in resp [:headers "x-ms-continuationtoken"])
+                        :items (-> resp :body :items)})
+                     s)))
 
 ```
 
@@ -209,11 +209,11 @@ The offset itself can be a number of items or a number of pages. It doesn't make
 (p/paginate-one!
   (p/engine)
   (fn [{:keys [page-cursor] :as s}]
-    (-> s
-        (p/merge-result
-          (let [resp (get-projects-with-offset "MY AUTH" page-cursor)]
-            {:page-cursor (get-in resp [:body :offset])
-             :items (get-in resp [:body :items])})))))
+    (p/merge-result
+      (let [resp (get-projects-with-offset "MY AUTH" page-cursor)]
+        {:page-cursor (get-in resp [:body :offset])
+         :items (get-in resp [:body :items])})
+      s)))
 ```
 
 ## Making a more generic get-pages-fn function
@@ -235,10 +235,10 @@ functions, so we want avoid repetition.
   [auth-token method url params]
   (fn [{:keys [page-cursor] :as s}]
     (p/merge-result
-      s
       (if page-cursor
         (api-call auth-token :get page-cursor {})
-        (api-call auth-token method url params)))))
+        (api-call auth-token method url params))
+      s)))
 
 (p/paginate-one!
   (p/engine)
@@ -276,7 +276,7 @@ Here's an example from tests:
                       (+ 2 p))}}))
 
 (defn v-result [s v]
-  (p/merge-result s {:page-cursor (-> v :body :offset) :items (-> v :body :items)}))
+  (p/merge-result {:page-cursor (-> v :body :offset) :items (-> v :body :items)} s))
 
 (defn get-accounts
   [{:keys [page-cursor] :as s}]

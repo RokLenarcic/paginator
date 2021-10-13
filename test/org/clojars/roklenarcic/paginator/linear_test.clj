@@ -29,22 +29,22 @@
   (is (= projects
          (p/paginate-one! (p/engine)
                           (fn [{:keys [page-cursor] :as s}]
-                            (-> s
-                                (p/merge-result
-                                  (let [resp (get-projects "MY AUTH" page-cursor)]
-                                    {:page-cursor (get-in resp [:headers "x-ms-continuationtoken"])
-                                     :items (-> resp :body :items)}))))))))
+                            (p/merge-result
+                              (let [resp (get-projects "MY AUTH" page-cursor)]
+                                {:page-cursor (get-in resp [:headers "x-ms-continuationtoken"])
+                                 :items (-> resp :body :items)})
+                              s))))))
 
 (deftest offset-test
   (is (= projects
          (p/paginate-one!
            (p/engine)
            (fn [{:keys [page-cursor] :as s}]
-             (-> s
-                 (p/merge-result
-                   (let [resp (get-projects-with-offset "MY AUTH" page-cursor)]
-                     {:page-cursor (get-in resp [:body :offset])
-                      :items (get-in resp [:body :items])}))))))))
+             (p/merge-result
+               (let [resp (get-projects-with-offset "MY AUTH" page-cursor)]
+                 {:page-cursor (get-in resp [:body :offset])
+                  :items (get-in resp [:body :items])})
+               s))))))
 
 
 (defn api-call [auth-token method url params]
@@ -58,10 +58,10 @@
   [auth-token method url params]
   (fn [{:keys [page-cursor] :as s}]
     (p/merge-result
-      s
       (if page-cursor
         (api-call auth-token :get page-cursor {})
-        (api-call auth-token method url params)))))
+        (api-call auth-token method url params))
+      s)))
 
 (deftest api-call-test
   (is (= projects
