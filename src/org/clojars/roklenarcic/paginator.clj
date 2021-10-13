@@ -78,12 +78,13 @@
 
   Default buffer size for result channel is 100.
   Default concurrency is 1, see with-concurrency docs for meaning of this setting."
-  ([] (engine future-call))
-  ([async-fn]
+  ([] (engine 1))
+  ([concurrency] (engine concurrency future-call))
+  ([concurrency async-fn]
    (-> {:async-fn async-fn}
        (with-batcher false)
        (with-result-buf 100)
-       (with-concurrency 1))))
+       (with-concurrency concurrency))))
 
 (defn paginate*!
   "Returns a channel for inbound paging state maps and a channel where the
