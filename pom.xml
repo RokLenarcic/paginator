@@ -4,8 +4,22 @@
   <packaging>jar</packaging>
   <groupId>org.clojars.roklenarcic</groupId>
   <artifactId>paginator</artifactId>
-  <version>0.2.4</version>
+  <version>0.2.5</version>
   <name>paginator</name>
+  <description>A small utility for async paging</description>
+  <url>https://github.com/RokLenarcic/paginator</url>
+  <licenses>
+    <license>
+      <name>Eclipse Public License 2.0</name>
+      <url>https://github.com/RokLenarcic/memento/blob/master/LICENSE</url>
+    </license>
+  </licenses>
+  <scm>
+    <url>https://github.com/RokLenarcic/paginator</url>
+    <connection>scm:git:git://github.com/RokLenarcic/paginator.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/RokLenarcic/paginator.git</developerConnection>
+  </scm>
+
   <dependencies>
     <dependency>
       <groupId>org.clojure</groupId>
