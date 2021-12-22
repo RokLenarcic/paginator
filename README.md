@@ -343,6 +343,17 @@ Here's an example from tests:
 
 [Listing branches via GitLab GraphQL API](doc/branches-example.md)
 
+## Exceptions
+
+As the paging proceeds concurrently more than 1 exception can arise before the process is stopped.
+
+Calls to `paginate*!` return exceptions as `:exception` key in paging-stages. More high level calls
+such as `paginate!`, `paginate-coll!`, `paginate-one!` will throw the exceptions found. Because there can
+be multiple, one a single `java.util.concurrent.ExecutionException` will be thrown with first exception
+found as cause and the rest added to suppressed exception list. See `Throwable.getSuppressed`.
+
+
+
 # License
 
 Copyright © 2021 Rok Lenarčič

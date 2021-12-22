@@ -2,7 +2,8 @@
   "Paginator enables paginating multiple concurrent items with batching."
   (:require [clojure.core.async :refer [chan go-loop >! close! onto-chan! <!! alts!] :as async]
             [org.clojars.roklenarcic.paginator.impl :as impl])
-  (:import (clojure.lang PersistentQueue)))
+  (:import (clojure.lang PersistentQueue)
+           (java.util.concurrent ExecutionException)))
 
 (defn merge-result
   "Updates paging state with result map. Anything in the result map overwrites current
@@ -127,14 +128,11 @@
 (defn throw-states-exceptions
   "Throws any exceptions in the states given."
   [states]
-  (let [ex-data
-        (reduce
-          (fn [acc states]
-            (update acc :causes conj (select-keys states [:exception :id :entity-type])))
-          {:causes []}
-          (filter :exception states))]
-    (when-not (empty? (:causes ex-data))
-      (throw (ex-info "Exceptions occurred during paged calls" ex-data (-> ex-data :causes first :exception))))))
+  (let [[first-cause & other] (keep :exception states)]
+    (when-some [e (some-> first-cause ExecutionException.)]
+      (doseq [cause other]
+        (.addSuppressed e cause))
+      (throw e))))
 
 (defn paginate!
   "Loads pages with given entity-id pairs. Returns a vector of paging states.
