@@ -86,13 +86,15 @@
         (update-in [:batcher :m] dissoc (key it)))
     engine))
 
+(defn runner-fn [f ch-result] (future (>!! ch-result (f))))
+
 (defn run-from-queue!
   "Enqueues a batch with the runner if there is one in the queue and the runner has capacity. Returns new engine state."
-  [{:keys [async-fn ch-result] :as engine}]
+  [{:keys [runner-fn ch-result] :as engine}]
   (when-let [batch (and (has-capacity? engine) (peek (get-in engine [:batcher :q])))]
     (get-in engine [:batcher :q])
     (swap! (:items-in-runner engine) inc)
-    (async-fn (fn [] (>!! ch-result (run!! engine batch))))
+    (runner-fn (fn [] (run!! engine batch)) ch-result)
     (update-in engine [:batcher :q] pop)))
 
 (defn finished? [engine]

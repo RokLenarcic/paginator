@@ -75,14 +75,16 @@
 (defn engine
   "Defines a minimal map describing the paging engine. Use with-* to add more options.
 
-  async-fn is a fn that takes a no-arg fn and runs it asynchronously, defaults to future-call
+  runner-fn is a function of 2 args that takes a no-arg function and a result-ch. It should run
+  the function, usually in some async manner and push the result into result-ch. By default it does
+  work in future pool and blockingly pushes the result into result-ch.
 
   Default buffer size for result channel is 100.
   Default concurrency is 1, see with-concurrency docs for meaning of this setting."
   ([] (engine 1))
-  ([concurrency] (engine concurrency future-call))
-  ([concurrency async-fn]
-   (-> {:async-fn async-fn}
+  ([concurrency] (engine concurrency impl/runner-fn))
+  ([concurrency runner-fn]
+   (-> {:runner-fn runner-fn}
        (with-batcher false)
        (with-result-buf 100)
        (with-concurrency concurrency))))

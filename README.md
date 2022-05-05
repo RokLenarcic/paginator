@@ -137,14 +137,16 @@ An engine is a map that describes aspects of your paging process.
 
 ```clojure
 (p/engine)
-(p/engine async-fn)
+(p/engine runner-fn)
 ```
 
-## async-fn
+## runner-fn
 
-This optional parameter is a function that takes a no-arg function and runs it asynchronously.
+This optional parameter is a function of 2 args that takes a no-arg function and a result-ch. It should run
+the function, usually in some async manner and push the result into result-ch.
 
-Defaults to `clojure.core/future-call`. You can use this to provide an alternative threadpool.
+Defaults to `clojure.core/future-call` + blocking core.async push. You can use this to provide an alternative threadpools
+or to use core.async directly (use go-block).
 
 ## with-batcher
 
