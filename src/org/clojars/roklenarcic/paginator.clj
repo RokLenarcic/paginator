@@ -148,13 +148,12 @@
     result-coll))
 
 (defn paginate-coll!
-  "Loads pages with given IDs. Returns a vector of vectors where each subvector
-  represents items for the id at that index in input parameters. Any exceptions are rethrown."
+  "Loads pages with given IDs. Returns a vector of paging states. Any exceptions are rethrown."
   [engine get-pages-fn entity-type ids]
   (let [lookup (reduce #(assoc %1 [(:entity-type %2) (:id %2)] %2)
                        {}
                        (paginate! engine get-pages-fn (map #(vector entity-type %) ids)))]
-    (mapv #(:items (lookup [entity-type %])) ids)))
+    (mapv #(lookup [entity-type %]) ids)))
 
 (defn paginate-one!
   "Starts pagination on a single entity and returns items. It expects that there is only 1 result.

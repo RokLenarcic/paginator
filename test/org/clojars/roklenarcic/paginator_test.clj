@@ -16,7 +16,7 @@
                       (Thread/sleep 10)
                       (.release semaphore)
                       (p/merge-result {:page-cursor (< (swap! pages inc) 100)} s))]
-      (is (= (repeat 10 []) (p/paginate-coll! (p/with-concurrency engine 5) get-pages :any (range 10))))
+      (is (= (repeat 10 []) (map :items (p/paginate-coll! (p/with-concurrency engine 5) get-pages :any (range 10)))))
       (is (thrown? Exception (p/paginate-coll! (p/with-concurrency engine 10) get-pages :any (range 100)))))))
 
 (def accounts
