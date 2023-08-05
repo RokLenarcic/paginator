@@ -61,6 +61,7 @@ The response to that query looks like this:
 Here's some code:
 
 ```clojure
+(def branches-per-page 100)
 (defn branches [auth-token ids page]
   (let [q (format "query {
                             projects(first: %s,

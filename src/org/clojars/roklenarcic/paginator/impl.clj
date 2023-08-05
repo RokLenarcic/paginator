@@ -1,116 +1,165 @@
 (ns org.clojars.roklenarcic.paginator.impl
-  (:require [clojure.core.async :refer [go <! >! >!! chan promise-chan]]))
+  (:require [clojure.set :refer [rename-keys]]
+            [org.clojars.roklenarcic.paginator.batcher :refer [queue-front queue-back poll-batch batcher-empty?]])
+  (:import (clojure.lang IPending)
+           (java.util ArrayList Queue)
+           (java.util.concurrent ExecutionException Future PriorityBlockingQueue Semaphore)))
 
-(defn swap-xf!
-  "A transducer that runs f on atom* for each item seen."
-  [atom* f]
-  (fn [rf]
-    (fn
-      ([] (rf))
-      ([result] (rf result))
-      ([result input]
-       (swap! atom* f)
-       (rf result input))
-      ([result input & inputs]
-       (swap! atom* f)
-       (apply rf result input inputs)))))
+(defrecord PagingState [items cursor pages add-page idx])
+(def empty-state (->PagingState [] nil 0 nil 0))
+(defn extra-props [p] (dissoc p :items :cursor :pages :add-page :idx))
 
-;; RUNNER MANAGEMENT
+(defn unwrap [p]
+  (if-let [props (and (instance? PagingState p) (extra-props p))]
+    (mapv #(if (map? %)
+             (merge props %)
+             (throw (ex-info (format "Result item %s is not a map. If you wish to return other types of items specify :wrapped? true in options." % )
+                             {:paging-state p})))
+          (:items p))
+    p))
 
-(defn has-capacity?
-  [engine]
-  (< @(:items-in-runner engine) (:max-concurrency engine)))
+(defn clean-stack-trace
+  "Return executionexception stacktrace with stack cleaned at the top"
+  [^Throwable ee]
+  (let [cause (.getCause ee)
+        bottom-st (drop-while #(not= "clojure.core$deref" (.getClassName %)) (.getStackTrace ee))]
+    (.setStackTrace (or cause ee) (into-array StackTraceElement (concat (some-> cause (.getStackTrace)) bottom-st)))
+    (or cause ee)))
 
-(defn merge-ps
-  "Updates an existing pagestate map with results. It will specially handle
-  :pages, :items, :page-cursor, the rest of it is merged into paging-state as is."
-  [result paging-state]
-  (if result
-    (-> paging-state
-        (update :pages inc)
-        (update :items into (remove nil?) (:items result))
-        (assoc :page-cursor (:page-cursor result))
-        (merge (dissoc result :pages :items :page-cursor)))
-    ;; no result... but there should be some
-    (assoc paging-state :page-cursor nil)))
+(defn- state-add-page-fn
+  "Creates the add page fn"
+  [paging-state replace-items?]
+  (fn state-add-page
+    ([page] (state-add-page page nil nil))
+    ([page cursor] (state-add-page page cursor nil))
+    ([page cursor other-props]
+     (-> (merge paging-state other-props)
+         (update :items (if replace-items? (fn [_ p] p) into) page)
+         (update :pages inc)
+         (assoc :cursor cursor)))))
 
-(defn paging-state?
-  "Returns true if the map looks like a paging state with cursor."
-  [s]
-  (and (map? s) (every? #(contains? s %) [:id :entity-type :items])))
+(defn deferred? [x] (or (instance? Future x) (instance? IPending x)))
+(defn spare-concurrency?
+  "Returns true if there seems to be concurrency to spare. Always
+  true if user didn't specify concurrency limit and it wasn't measured."
+  [run-fn options]
+  (if-let [^Semaphore sem (:org.clojars.roklenarcic.paginator/semaphore (meta run-fn))]
+    (pos-int? (.availablePermits sem))
+    (let [used (.size ^Queue (::futs options))
+          allowed (::concurrency options)]
+      (or (nil? allowed) (< used @allowed)))))
 
-(defn mark-invalid-state
-  "If state is invalid, mark it with an exception"
-  [s]
-  (if (paging-state? s)
-    s
-    (assoc (if (map? s) s {})
-      :exception (ex-info "Returned value doesn't seem to be a paging state, must have keys [:id :entity-type :items]."
-                          {:invalid-state s})
-      :page-cursor nil)))
-
-(defn run!! [{:keys [get-pages-fn items-in-runner items-in-process]} paging-states]
+(defn realized
+  "Returns realized result or nil"
+  [res]
   (try
-    (let [returned-states (get-pages-fn paging-states)
-          returned-states (if (map? returned-states) [returned-states] (vec returned-states))]
-      (swap! items-in-process + (- (count returned-states) (count paging-states)))
-      (mapv mark-invalid-state returned-states))
-    (catch Exception e
-      (mapv #(assoc % :exception e :page-cursor nil) paging-states))
-    (finally
-      (swap! items-in-runner dec))))
+    (condp instance? res
+      IPending (when (realized? res) @res)
+      Future (when (.isDone ^Future res) @res)
+      res)
+    (catch ExecutionException ee
+      (throw (clean-stack-trace ee)))))
 
-;; BATCH AND QUEUE MANAGEMENT
+(defn vol++ [v] (doto @v (->> inc (vreset! v))))
 
-(defn add-to-batch
-  "Adds item to batch, adds batch to queue if max-items was reached."
-  [engine it]
-  (let [{:keys [max-items batch-fn]} (:batcher engine)
-        batch-key (batch-fn it)
-        engine (update-in engine [:batcher :m batch-key] (fnil conj []) it)
-        batch (get-in engine [:batcher :m batch-key])]
-    (if (>= (count batch) max-items)
-      (-> engine
-          (update-in [:batcher :q] conj batch)
-          (update-in [:batcher :m] dissoc batch-key))
-      engine)))
+;; processed items map is a map:
+;; - :to-batch, :to-ret, :pending
+;;  if the operation did something nothing that moves the process along it returns nil
 
-(defn force-enqueue
-  "Forces a batch to queue if queue is empty and the runner state allows for more tasks"
-  [engine]
-  (if-let [it (and (has-capacity? engine)
-                   (nil? (peek (-> engine :batcher :q)))
-                   (first (get-in engine [:batcher :m])))]
-    (-> engine
-        (update-in [:batcher :q] conj (val it))
-        (update-in [:batcher :m] dissoc (key it)))
-    engine))
+(defn read-input
+  "Tries to gather an item from input returns processed items map, if able."
+  [input]
+  (let [curr-input @input]
+    (if (seq curr-input)
+      (do (vreset! input (rest curr-input))
+          {:to-batch [(first curr-input)]})
+      (vreset! input nil))))
 
-(defn runner-fn [f ch-result] (future (>!! ch-result (f))))
+(defn process-ret
+  "Process a return, returning a processed items map."
+  [ret]
+  (cond
+    (deferred? ret) {:pending ret}
+    (sequential? ret) (rename-keys (group-by #(and (instance? PagingState %) (nil? (:cursor %))) ret)
+                                   {true :to-ret false :to-batch})
+    :else (process-ret [ret])))
 
-(defn run-from-queue!
-  "Enqueues a batch with the runner if there is one in the queue and the runner has capacity. Returns new engine state."
-  [{:keys [runner-fn ch-result] :as engine}]
-  (when-let [batch (and (has-capacity? engine) (peek (get-in engine [:batcher :q])))]
-    (get-in engine [:batcher :q])
-    (swap! (:items-in-runner engine) inc)
-    (runner-fn (fn [] (run!! engine batch)) ch-result)
-    (update-in engine [:batcher :q] pop)))
+(defn poll-futures
+  "Iterates the futures Queue, finds any finished futures, processes the return,
+  returning processed items map or nil if no future has been resolved."
+  [^Queue futs]
+  (let [iter (.iterator futs)]
+    (loop [ret nil]
+      (if-let [it (and (.hasNext iter) (.next iter))]
+        (if-let [real (realized it)]
+          (do (.remove iter) (recur (merge-with into ret (process-ret real))))
+          (recur ret))
+        ret))))
 
-(defn finished? [engine]
-  "Is the paging process finished?
+(defn instr-batch
+  "Add :add-page function to all items."
+  [items emit-pages?]
+  (let [instr #(assoc % :add-page (state-add-page-fn % emit-pages?))]
+    (if (instance? PagingState items) (instr items) (map instr items))))
 
-  If input is closed+no tasks in the process."
-  (and (nil? (:ch-in engine)) (zero? @(:items-in-process engine))))
+(defn finalize-result
+  "Act on operation result, sending items to their respective queues."
+  [result {::keys [batcher ^Queue futs counters ^Queue results pages?]}]
+  (let [idx-counter (:in-cnt counters)
+        {:keys [to-ret to-batch pending]} result
+        to-batch-groups (group-by #(instance? PagingState %) to-batch)]
+    (run! #(.offer results %) to-ret)
+    (when pages? (run! #(.offer results %) to-batch))
+    (run! #(queue-back batcher (merge empty-state % {:idx (vol++ idx-counter)})) (to-batch-groups false))
+    (run! #(queue-front batcher %) (reverse (to-batch-groups true)))
+    (when pending (.offer futs pending))
+    result))
 
-(defn init-engine [engine get-pages-fn]
-  (let [items-in-runner (atom 0)
-        items-in-process (atom 0)]
-    (assoc engine :items-in-runner items-in-runner
-                  :items-in-process items-in-process
-                  :get-pages-fn get-pages-fn
-                  :ch-in (chan 15 (swap-xf! items-in-process inc))
-                  :ch-out (chan (:buf-size engine) (swap-xf! items-in-process dec))
-                  ;; always do increase first so both atoms cannot be 0 between operations
-                  :ch-result (chan 100 (mapcat identity)))))
+(defn- no-batcher-inputs? [^Queue futs input]
+  (and (.isEmpty futs) (nil? @input)))
 
+(defn- processing-done? [{::keys [batcher futs input]}]
+  (and (batcher-empty? batcher) (no-batcher-inputs? futs input)))
+
+(defn page-loop
+  "Dual queue synchronous page-loop. Input is a volatile containing items and is lazily read when queue is empty.
+
+  Tries to finish one of the tasks that moves the engine along. If task returns a map, even an empty one,
+  it is considered to have done something and the next tasks are not tried. The list of finished items is pushed
+  into a priority queue based on :idx of PagingState. This enables that we can emit results in order of inputs if
+  desired.
+
+  PagingStates are tagged with increasing idx."
+  [{::keys [run-fn batcher ^Queue futs input ^PriorityBlockingQueue results pages?] :as options} out-cnt]
+  (loop []
+    (let [first-item (.peek results)]
+      ;; shuttle results into heap for sorting, emit them sorted
+      ;; if pages returning is enabled the whole out-cnt is ignored
+      (if (and first-item (or pages? (= out-cnt (:idx first-item))))
+        (do (.poll results)
+            (cons first-item (lazy-seq (page-loop options (inc out-cnt)))))
+        ;; try to clear any finished futures, moving to result or batcher
+        (let [items (or (poll-futures futs)
+                        ;; if batcher has work available, try to run that
+                        (when-some [batch (poll-batch batcher
+                                                      (no-batcher-inputs? futs input)
+                                                      (spare-concurrency? run-fn options))]
+                          (process-ret (run-fn (instr-batch batch pages?))))
+                        ;; else try waiting for input if there's more and enqueue that
+                        (read-input input)
+                        ;; don't spin too fast if nothing is going on
+                        (Thread/sleep 1))]
+          (finalize-result items options)
+          (if (processing-done? options)
+            (let [ll (ArrayList.)]
+              ;; priority queue needs this operation to return items in correct order instead of just straight seq
+              (.drainTo results ll)
+              (seq ll))
+            (recur)))))))
+
+(defn page-loop-solo [input run-fn pages?]
+  (let [page-state (if (instance? PagingState input) input (merge empty-state {:idx 0} input))]
+    (as-> (run-fn (instr-batch page-state pages?)) res
+          (if (deferred? res) (try @res (catch ExecutionException ee (throw (clean-stack-trace ee))))
+                              res)
+          (if (sequential? res) (first res) res))))
