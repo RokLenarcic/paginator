@@ -20,11 +20,12 @@
 
 (deftest realized-test
   (let [p (promise) f (future (Thread/sleep 1000) 10)]
-    (is (= nil (b/realized f)))
-    (is (= 10 (b/realized @f)))
-    (is (= nil (b/realized p)))
-    (is (= 1 (do (deliver p 1) (b/realized p))))
-    (is (= {} (b/realized {})))))
+    (is (= nil (b/realized f false)))
+    (is (= 10 (b/realized f true)))
+    (is (= 10 (b/realized @f false)))
+    (is (= nil (b/realized p false)))
+    (is (= 1 (do (deliver p 1) (b/realized p false))))
+    (is (= {} (b/realized {} false)))))
 
 (deftest v++-test
   (let [v (volatile! 1)]

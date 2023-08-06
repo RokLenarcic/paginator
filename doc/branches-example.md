@@ -89,28 +89,20 @@ Here's some code:
        :form-params {:query q}})))
 
 (defn project-branches [auth-token paging-states]
-  (let [page (:page-cursor (first paging-states) 0)
+  (let [page (:cursor (first paging-states) 0)
         b (branches auth-token (map :id paging-states) page)
-        nodes (get-in b [:body :data :projects :nodes])
-        results (mapv (fn [{:keys [id repository] :as node}]
-                        {:id id
-                         :entity-type :project-branches
-                         :project (update node :repository dissoc :branchNames)
-                         :page-cursor (when (>= (count (:branchNames repository)) branches-per-page)
-                                        (inc page))
-                         :items (:branchNames repository)})
-                      nodes)]
-    (p/merge-results paging-states results)))
+        nodes (group-by :id (get-in b [:body :data :projects :nodes]))]
+    (mapv (fn [{:keys [add-page id]}]
+            (let [{:keys [repository]} (first (nodes id))]
+              (add-page (:branchNames repository)
+                        (when (>= (count (:branchNames repository)) branches-per-page)
+                          (inc page))
+                        {:project (update node :repository dissoc :branchNames)})))
+          paging-states)))
 
-(def e2 (-> (p/engine)
-            (p/with-concurrency 5)
-            (p/with-batcher false ids-per-page :page-cursor)))
-
-
-(p/paginate!
-  e2
-  #(project-branches "521aaxxxxxx7befc7828" %)
-  (map #(vector :project-branches %) ids))
+(p/paginate! (p/async-fn #(project-branches "521aaxxxxxx7befc7828" %) 5)
+             {:batcher (p/grouped-batcher :cursor ids-per-page)}
+             ids)
 ```
 
 ### project-branches
@@ -151,10 +143,9 @@ is twice lower than when concurrency is 1.
 ```clojure
 [....
  {:id "gid://gitlab/Project/29917873",
-  :entity-type :project-branches,
   :pages 1,
   :items ["master"],
-  :page-cursor nil,
+  :cursor nil,
   :project {:id "gid://gitlab/Project/29917873",
             :name "Awesome Hacking",
             :visibility "private",
@@ -163,7 +154,6 @@ is twice lower than when concurrency is 1.
             :namespace {:id "gid://gitlab/Group/13505299"},
             :repository {:rootRef "master"}}}
  {:id "gid://gitlab/Project/29917932",
-  :entity-type :project-branches,
   :pages 1,
   :items ["dependabot/npm_and_yarn/socket.io-2.4.1"
           "gg/docz"
@@ -188,7 +178,7 @@ is twice lower than when concurrency is 1.
           "v4"
           "ad/popover2props-compatibility"
           "query-list-create-item"],
-  :page-cursor nil,
+  :cursor nil,
   :project {:id "gid://gitlab/Project/29917932",
             :name "Blueprint",
             :visibility "private",

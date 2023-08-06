@@ -1,13 +1,24 @@
 (ns org.clojars.roklenarcic.paginator.impl
   (:require [clojure.set :refer [rename-keys]]
             [org.clojars.roklenarcic.paginator.batcher :refer [queue-front queue-back poll-batch batcher-empty?]])
-  (:import (clojure.lang IPending)
+  (:import (clojure.lang IDeref IPending)
            (java.util ArrayList Queue)
            (java.util.concurrent ExecutionException Future PriorityBlockingQueue Semaphore)))
 
 (defrecord PagingState [items cursor pages add-page idx])
 (def empty-state (->PagingState [] nil 0 nil 0))
-(defn extra-props [p] (dissoc p :items :cursor :pages :add-page :idx))
+(def paging-state-props [:items :cursor :pages :add-page :idx])
+(defn extra-props [p] (apply dissoc p paging-state-props))
+(defn validate-extra-props [p]
+  (run! #(when-let [[prop _] (find p %)]
+           (throw (ex-info (str "Input contains map key already used by PagingState record: " prop)
+                           {:in p})))
+        paging-state-props))
+
+(defn merge-to-ps [ps x]
+  (let [m (if (map? x) x {:id x})]
+    (validate-extra-props m)
+    (merge ps m)))
 
 (defn unwrap [p]
   (if-let [props (and (instance? PagingState p) (extra-props p))]
@@ -22,7 +33,7 @@
   "Return executionexception stacktrace with stack cleaned at the top"
   [^Throwable ee]
   (let [cause (.getCause ee)
-        bottom-st (drop-while #(not= "clojure.core$deref" (.getClassName %)) (.getStackTrace ee))]
+        bottom-st (drop-while #(not= "clojure.core$deref" (.getClassName ^StackTraceElement %)) (.getStackTrace ee))]
     (.setStackTrace (or cause ee) (into-array StackTraceElement (concat (some-> cause (.getStackTrace)) bottom-st)))
     (or cause ee)))
 
@@ -33,12 +44,15 @@
     ([page] (state-add-page page nil nil))
     ([page cursor] (state-add-page page cursor nil))
     ([page cursor other-props]
-     (-> (merge paging-state other-props)
+     (-> (if other-props
+           (merge-to-ps paging-state other-props)
+           paging-state)
          (update :items (if replace-items? (fn [_ p] p) into) page)
          (update :pages inc)
          (assoc :cursor cursor)))))
 
-(defn deferred? [x] (or (instance? Future x) (instance? IPending x)))
+(defn deferred? [x] (or (instance? Future x) (and (instance? IPending x)
+                                                  (instance? IDeref x))))
 (defn spare-concurrency?
   "Returns true if there seems to be concurrency to spare. Always
   true if user didn't specify concurrency limit and it wasn't measured."
@@ -51,11 +65,11 @@
 
 (defn realized
   "Returns realized result or nil"
-  [res]
+  [res block?]
   (try
     (condp instance? res
-      IPending (when (realized? res) @res)
-      Future (when (.isDone ^Future res) @res)
+      IPending (when (or block? (realized? res)) @res)
+      Future (when (or block? (.isDone ^Future res)) @res)
       res)
     (catch ExecutionException ee
       (throw (clean-stack-trace ee)))))
@@ -91,7 +105,7 @@
   (let [iter (.iterator futs)]
     (loop [ret nil]
       (if-let [it (and (.hasNext iter) (.next iter))]
-        (if-let [real (realized it)]
+        (if-let [real (realized it false)]
           (do (.remove iter) (recur (merge-with into ret (process-ret real))))
           (recur ret))
         ret))))
@@ -110,7 +124,7 @@
         to-batch-groups (group-by #(instance? PagingState %) to-batch)]
     (run! #(.offer results %) to-ret)
     (when pages? (run! #(.offer results %) to-batch))
-    (run! #(queue-back batcher (merge empty-state % {:idx (vol++ idx-counter)})) (to-batch-groups false))
+    (run! #(queue-back batcher (assoc (merge-to-ps empty-state %) :idx (vol++ idx-counter))) (to-batch-groups false))
     (run! #(queue-front batcher %) (reverse (to-batch-groups true)))
     (when pending (.offer futs pending))
     result))
@@ -158,8 +172,7 @@
             (recur)))))))
 
 (defn page-loop-solo [input run-fn pages?]
-  (let [page-state (if (instance? PagingState input) input (merge empty-state {:idx 0} input))]
+  (let [page-state (if (instance? PagingState input) input (merge-to-ps empty-state input))]
     (as-> (run-fn (instr-batch page-state pages?)) res
-          (if (deferred? res) (try @res (catch ExecutionException ee (throw (clean-stack-trace ee))))
-                              res)
+          (if (deferred? res) (realized res true) res)
           (if (sequential? res) (first res) res))))

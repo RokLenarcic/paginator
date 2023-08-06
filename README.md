@@ -12,15 +12,28 @@ You interact with this library by importing `[org.clojars.roklenarcic.paginator 
   (let [{:keys [items offset]} (:body (get-account-projects-by-id account-id cursor))]
     (add-page items offset)))
 
-(p/paginate-one! {:account-id 1} account-projects)
+(p/paginate-one! {:account-id 0} account-projects)
 =>
-[{:account-id 1, :project 10, :account 1}
- .....
- {:account-id 1, :project 18, :account 1}
- {:account-id 1, :project 19, :account 1}]
+#p/PagingState{:items [{:project 0, :account 0}
+                       {:project 1, :account 0}
+                       {:project 2, :account 0}
+                       {:project 3, :account 0}
+                       {:project 4, :account 0}
+                       {:project 5, :account 0}
+                       {:project 6, :account 0}
+                       {:project 7, :account 0}
+                       {:project 8, :account 0}
+                       {:project 9, :account 0}],
+               :cursor nil,
+               :pages 5,
+               :add-page nil,
+               :idx 0,
+               :account-id 0}
 ```
 
-The input map you provide will be merged into PagingState record with additional properties of:
+Any input that is not map is converted into `{:id value}`.
+
+The input map is merged into PagingState record with record fields of:
 - cursor (last returned cursor, starts with nil)
 - pages
 - items (starts empty)
@@ -31,7 +44,10 @@ Your function will be called with this record iteratively to load more pages. Us
 and cursor to make loads. **Don't have these keys in your input map.**
 
 When returning, you can use convenience function `add-page`, which is fn that will
-return PagingState updated with more items and the new cursor.
+return PagingState updated with more items and the new cursor. It has multiple arities:
+- `(fn [additional-items])`, next cursor is nil, stops paging
+- `(fn [additional-items next-cursor])`
+- `(fn [additional-items next-cursor extra-properties])` will add more properties to PagingState
 
 Also see [result unwrapping](#result-unwrapping)
 
@@ -54,7 +70,7 @@ A convenience function is provided that will wrap any function in invocation of 
 We can submit multiple items to load pages for, in this case the function returns
 *a lazy sequence of finished PagingStates as they are finished*. 
 
-Your function can return a PagingState or a map or a collection of these items, or a Future returning one of these.
+Your function can return a PagingState or another value or a collection of these items, or a Future returning one of these.
 
 ```clojure
 (p/paginate! account-projects {} [{:account-id 1} {:account-id 2}])
@@ -63,8 +79,10 @@ Your function can return a PagingState or a map or a collection of these items, 
 We get *a lazy sequence* of finished PagingStates as they become available:
 
 ```clojure
-([{:project 10, :account-id 1} ....]
- [{:project 20, :account-id 2} .... ])
+(#p/PagingState{:items [{:project 10, :account 1} ... {:project 19, :account 1}],
+                :cursor nil, :pages 5, :add-page nil, :idx 0, :account-id 1}
+ #p/PagingState{:items [{:project 20, :account 2} ... {:project 29, :account 2}],
+                :cursor nil, :pages 5, :add-page nil, :idx 0, :account-id 2})
 ```
 
 Order from input is preserved.
@@ -93,14 +111,14 @@ is `:min-batches` which will produce the fewest batches possible.
 
 ### Result unwrapping
 
-By default, each finished PagingState is unwrapped: `:items` vector is returned, with all with the extra properties from paging state merged in.
-To make that work your items need to be maps. You can specify option `:wrapped true` to return plain PagingStates instead
-in which case your items can be Longs or other such primitives.
+A helper function `p/unwrap` is provided which will unwrap PagingState, returning vector of its items, merging into each
+item extra properties from enclosing PagingState. This is only possible if items are maps, so `p/unwrap` will throw if
+items are not maps.
 
 ### Injecting additional items
 
-You can return a map instead of PagingState from your function, any such return will be converted to PagingState 
-and queued.
+You can return another value instead of PagingState from your function, any such return will be converted to PagingState 
+and queued, same as inputs.
 
 ### Returning pages
 
@@ -139,9 +157,9 @@ or you can use the laziness of return to stick together multiple paging invocati
 ### Using the laziness of output
 
 ```clojure
-(let [accounts (p/paginate! user-accounts {:batcher (p/batcher 5)} users)
-      groups (p/paginate! account-groups {:batcher (p/batcher 5)} (apply concat accounts))]
-  (p/paginate group-projects {:batcher (p/batcher 5)} (apply concat groups)))
+(let [accounts (mapcat p/unwrap (p/paginate! user-accounts {:batcher (p/batcher 5)} users))
+      groups (mapcat p/unwrap (p/paginate! account-groups {:batcher (p/batcher 5)} accounts))]
+  (p/paginate group-projects {:batcher (p/batcher 5)} groups))
 ```
 
 In this case you end up with a lazy sequence that will try to read `groups` lazy sequence, that will try to read `accounts`
@@ -165,6 +183,10 @@ This uses a grouped batcher by type to make sure you get paging states of a part
 
 Pro is that everything happens in one paging process, so you can apply concurrency limits and such. Con is that
 it looks messier.
+
+## A more complex example
+
+[Listing branches via GitLab GraphQL API](doc/branches-example.md)
 
 # License
 

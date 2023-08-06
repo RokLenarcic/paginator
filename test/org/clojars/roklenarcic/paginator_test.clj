@@ -1,6 +1,8 @@
 (ns org.clojars.roklenarcic.paginator-test
-  (:require [clojure.test :refer :all]
-            [org.clojars.roklenarcic.paginator :as p])
+  (:require [clojure.set :as set]
+            [clojure.test :refer :all]
+            [org.clojars.roklenarcic.paginator :as p]
+            [org.clojars.roklenarcic.paginator.impl :as b])
   (:import (clojure.lang ExceptionInfo)
            (java.util.concurrent Semaphore)))
 
@@ -14,7 +16,7 @@
                       (Thread/sleep 10)
                       (.release semaphore)
                       (add-page [] (when (< (swap! pages inc) 200) true)))]
-      (is (= (repeat 10 []) (p/paginate! (p/async-fn get-pages 5) {} (map #(assoc nil :id %) (range 10)))))
+      (is (= (repeat 10 []) (map p/unwrap (p/paginate! (p/async-fn get-pages 5) {} (map #(assoc nil :id %) (range 10))))))
       (is (thrown? Exception (p/paginate! (p/async-fn get-pages 10) {} (map #(assoc nil :id %) (range 100))))))))
 
 (defn get-from-vector
@@ -40,13 +42,21 @@
 (defn ret-for-acc
   "Helper fn"
   [acc-id]
-  (mapv #(assoc % :account-id acc-id) (projects-of-accounts acc-id)))
+  (merge b/empty-state
+         {:idx acc-id :account-id acc-id :items (projects-of-accounts acc-id) :pages 5}))
 
 (defn ret-for-acc-pages
   "Helper fn"
   [acc-id]
-  (let [ps (ret-for-acc acc-id)]
-    (map #(subvec ps % (+ 2 %)) (range 0 (count ps) 2))))
+  (let [ps (ret-for-acc acc-id)
+        item-num (count (:items ps))
+        pages (range 1 (inc (/ item-num 2)))]
+    (map (fn [page]
+           (let [cursor (* 2 page)]
+             (assoc ps :items (subvec (:items ps) (- cursor 2) cursor)
+                       :cursor (when-not (= item-num cursor) cursor)
+                       :pages page)))
+         pages)))
 
 (defn get-account-projects-by-id [account-id cursor]
   (get-from-vector (projects-of-accounts account-id) cursor))
@@ -64,13 +74,16 @@
     (is (= (ret-for-acc 0) (p/paginate-one! {:account-id 0} #(future (account-projects %))))))
   (testing "pages test"
     (is (= (ret-for-acc-pages 0)
-           (vec (p/paginate-one! {:account-id 0} projects-by-id {:pages? true}))))))
+           (p/paginate-one! {:account-id 0} projects-by-id {:pages? true}))))
+  (testing "automatic input conversion"
+    (is (= (-> (ret-for-acc 0) (set/rename-keys {:account-id :id}))
+           (p/paginate-one! 0 (comp account-projects #(set/rename-keys % {:id :account-id})))))))
 
 (deftest paginate-test
   (let [all-accounts (map #(assoc {} :account-id %) (range 10))
         all-ret (map ret-for-acc (range 10))
         all-pages (mapcat ret-for-acc-pages (range 10))
-        sorted #(sort-by (comp (juxt :account-id :project) first) %)]
+        sorted #(sort-by (juxt :account-id :project) %)]
     (testing "non-batched"
       (is (= all-ret (p/paginate! account-projects {} all-accounts)))
       (is (= all-ret (p/paginate! #(future (account-projects %)) {} all-accounts)))
@@ -94,119 +107,8 @@
   (throw (ex-info "No bueno" {:test 1})))
 
 (deftest exception-tests
-  (is (thrown? ExceptionInfo (p/paginate-one! {:account-id 0} #(future (broken-function %))))))
-
-
-                #_(def accounts
-  [{:account-name "A"} {:account-name "B"} {:account-name "C"} {:account-name "D"} {:account-name "E"} {:account-name "F"}])
-
-#_(def repositories
-  {"A" [{:repo-name "A/1"} {:repo-name "A/2"} {:repo-name "A/3"} {:repo-name "A/4"} {:repo-name "A/5"}]
-   "B" []
-   "C" [{:repo-name "C/1"}]
-   "D" [{:repo-name "D/1"} {:repo-name "D/2"} {:repo-name "D/3"} {:repo-name "D/4"} {:repo-name "D/5"} {:repo-name "D/6"}]
-   "E" [{:repo-name "E/1"} {:repo-name "E/2"}]
-   "F" [{:repo-name "F/1"} {:repo-name "F/2"} {:repo-name "F/3"}]})
-
-
-#_(defn get-accounts
-  [{:keys [cursor add-page] :as s}]
-  (let [resp (get-from-vector accounts cursor)]
-    (cons (v-result s resp)
-          (->> resp :body :items (map #(p/paging-state ::account-repos (:account-name %)))))))
-
-#_(defn get-account-repos
-  [{:keys [page-cursor id] :as s}]
-  (v-result s (get-from-vector (repositories id) page-cursor)))
-
-#_(deftest expanding-test
-  (testing "expands into multiple paging states"
-    (is (= [{:entity-type :x
-             :id 1
-             :items []
-             :page-cursor 1
-             :pages 1}
-            (p/paging-state :account 1)
-            (p/paging-state :account 2)
-            (p/paging-state :account 3)
-            (p/paging-state :account 5)]
-           (p/merge-expand-result
-             {:items [1 2 3 5]
-              :page-cursor 1}
-             (p/paging-state :x 1)
-             (map #(p/paging-state :account %))))))
-  (testing "multiple expand"
-    (is (= [{:entity-type :x
-             :id 1
-             :items []
-             :page-cursor nil
-             :pages 1}
-            (p/paging-state :account 5)
-            (p/paging-state :account 6)
-            {:entity-type :x
-             :id 2
-             :items []
-             :page-cursor nil
-             :pages 1}
-            (p/paging-state :account 0)
-            (p/paging-state :account 1)]
-           (p/merge-expand-results
-             [{:id 2 :entity-type :x :items [0 1]}
-              {:id 1 :entity-type :x :items [5 6]}
-              {:id 3 :entity-type :y :items [15 15]}]
-             [(p/paging-state :x 1) (p/paging-state :x 2)]
-             (map #(p/paging-state :account %)))))))
-
-#_(deftest multi-entity-types-test
-  (testing "multiple entity types"
-    (is (= [{:entity-type ::account-repos
-             :id "B"
-             :items []
-             :page-cursor nil
-             :pages 1}
-            {:entity-type ::account-repos
-             :id "C"
-             :items [{:repo-name "C/1"}]
-             :page-cursor nil
-             :pages 1}
-            {:entity-type ::account-repos
-             :id "E"
-             :items [{:repo-name "E/1"}
-                     {:repo-name "E/2"}]
-             :page-cursor nil
-             :pages 1}
-            {:entity-type ::account-repos
-             :id "A"
-             :items [{:repo-name "A/1"}
-                     {:repo-name "A/2"}
-                     {:repo-name "A/3"}
-                     {:repo-name "A/4"}
-                     {:repo-name "A/5"}]
-             :page-cursor nil
-             :pages 3}
-            {:entity-type ::account-repos
-             :id "F"
-             :items [{:repo-name "F/1"}
-                     {:repo-name "F/2"}
-                     {:repo-name "F/3"}]
-             :page-cursor nil
-             :pages 2}
-            {:entity-type ::account-repos
-             :id "D"
-             :items [{:repo-name "D/1"}
-                     {:repo-name "D/2"}
-                     {:repo-name "D/3"}
-                     {:repo-name "D/4"}
-                     {:repo-name "D/5"}
-                     {:repo-name "D/6"}]
-             :page-cursor nil
-             :pages 3}]
-          (filter #(= ::account-repos (:entity-type %))
-                  (p/paginate! (p/engine)
-                               (fn [paging-states]
-                                 (case (p/entity-type paging-states)
-                                   ::accounts (get-accounts (first paging-states))
-                                   ::account-repos (get-account-repos (first paging-states))))
-                               [[::accounts nil]]))))))
-
-
+  (is (thrown? ExceptionInfo (p/paginate-one! {:account-id 0} #(future (broken-function %)))))
+  ;; don't let people replace needed keys
+  (is (thrown? ExceptionInfo (p/paginate-one! {:idx 0} identity)))
+  ;; don't let people replace needed keys
+  (is (thrown? ExceptionInfo (p/paginate! identity {} [{:idx 0}]))))

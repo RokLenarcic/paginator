@@ -1,6 +1,7 @@
 (ns org.clojars.roklenarcic.paginator.linear-test
   (:require [clojure.test :refer :all]
-            [org.clojars.roklenarcic.paginator :as p]))
+            [org.clojars.roklenarcic.paginator :as p]
+            [org.clojars.roklenarcic.paginator.impl :as b]))
 
 (def projects [{:id 1 :name "P1"}
                {:id 2 :name "P2"}
@@ -41,7 +42,7 @@
       (add-page items page-cursor))))
 
 (deftest continuation-token-test
-  (is (= projects
+  (is (= (assoc b/empty-state :items projects :pages 5)
          (p/paginate-one!
            {}
            (fn [{:keys [cursor add-page] :as s}]
@@ -50,7 +51,7 @@
                          (get-in resp [:headers "x-ms-continuationtoken"]))))))))
 
 (deftest offset-test
-  (is (= projects
+  (is (= (assoc b/empty-state :items projects :pages 5)
          (p/paginate-one!
            {}
            (fn [{:keys [cursor add-page] :as s}]
@@ -59,5 +60,5 @@
                          (get-in resp [:body :offset]))))))))
 
 (deftest api-call-test
-  (is (= projects
+  (is (= (assoc b/empty-state :items projects :pages 5)
          (p/paginate-one! {} (api-caller "X" :get "/projects" {})))))
