@@ -63,10 +63,8 @@ Your function can return a PagingState or a map or a collection of these items, 
 We get *a lazy sequence* of finished PagingStates as they become available:
 
 ```clojure
-(#org.clojars.roklenarcic.paginator.impl.PagingState{:items [{:project 10, :account 1} ....],
-                                                     :cursor nil, :pages 5, :add-page nil, :idx 0, :account-id 1}
- #org.clojars.roklenarcic.paginator.impl.PagingState{:items [{:project 20, :account 2} ....],
-                                                     :cursor nil, :pages 5, :add-page nil, :idx 1, :account-id 2})
+([{:project 10, :account-id 1} ....]
+ [{:project 20, :account-id 2} .... ])
 ```
 
 Order from input is preserved.
