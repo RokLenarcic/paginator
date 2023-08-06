@@ -27,14 +27,15 @@
                               :main-args ["-m" "cognitect.test-runner"]))
         {:keys [exit]} (b/process cmd)]
     (when-not (zero? exit)
-      (throw (ex-info "Tests failed" {})))
-    opts))
+      (throw (ex-info "Tests failed" {}))))
+  opts)
 
 (defn jar [opts]
-  (let [{:keys [src-dirs resource-dirs] :as opts} (create-opts opts nil)]
+  (let [{:keys [src-dirs resource-dirs jar-file class-dir] :as opts} (create-opts opts nil)]
     (b/write-pom opts)
     (b/copy-dir {:src-dirs (concat src-dirs resource-dirs)
-                 :target-dir (:class-dir opts)})
+                 :target-dir class-dir})
+    (println "Building jar" (str jar-file "..."))
     (b/jar opts))
   opts)
 
