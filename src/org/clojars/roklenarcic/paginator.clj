@@ -1,168 +1,77 @@
 (ns org.clojars.roklenarcic.paginator
   "Paginator enables paginating multiple concurrent items with batching."
-  (:require [clojure.core.async :refer [chan go-loop >! close! onto-chan! <!! alts!] :as async]
-            [org.clojars.roklenarcic.paginator.impl :as impl])
-  (:import (clojure.lang PersistentQueue)
-           (java.util.concurrent ExecutionException)))
+  (:require [org.clojars.roklenarcic.paginator.impl :as impl]
+            [org.clojars.roklenarcic.paginator.batcher :as batcher])
+  (:import (clojure.lang IPending)
+           (java.util Comparator)
+           (java.util.concurrent ConcurrentLinkedQueue PriorityBlockingQueue Semaphore)))
 
-(defn merge-result
-  "Updates paging state with result map. Anything in the result map overwrites current
-   values in paging-state. The exception are keys:
-   - :page (which increases by 1)
-   - :items values are combined"
-  [result paging-state]
-  (impl/merge-ps result paging-state))
+(defn async-fn
+  "Helper to wrap a function into one that executes async in 'future',
+  with concurrency limited to concurrency. The returned fn has semaphone object in meta.
 
-(defn merge-expand-result
-  "Updates paging state with result map. Returns a collection with
-  updated paging state + expansion.
+  If you pass another fn created by this function as concurrency, the returned function will share
+  the concurrency limit with the other one."
+  [f max-concurrency]
+  (let [^Semaphore sem (or (::semaphore (meta max-concurrency)) (Semaphore. max-concurrency))]
+    (with-meta
+      (fn [& args] (.acquire sem)
+        (future
+          (try
+            (apply f args)
+            (finally (.release sem)))))
+      {::semaphore sem})))
 
-   Anything in the result map overwrites current values in paging-state.
-   The exception are keys:
-   - :page (which increases by 1)
-   - :items are not added, but instead they are processed through
-    transducer xf and added to the returned collection"
-  [result paging-state xf]
-  (into [(impl/merge-ps (when result (assoc result :items [])) paging-state)] xf (:items result)))
+(defn batcher
+  "Create batcher with parameters:
+  - batch size
+  - partial-batch-strategy (can be nil, :min-batches, or map of factors)"
+  ([batch-size] (batcher batch-size nil))
+  ([batch-size partial-batch-strategy] (batcher/grouped-batcher (constantly nil) batch-size partial-batch-strategy)))
 
-(defn merge-expand-results
-  "Updates paging states with the results + expansions, see merge-expand-result."
-  [results paging-states xf]
-  (let [m (reduce (fn [m r] (assoc m [(:entity-type r) (:id r)] r)) {} results)]
-    (vec (mapcat #(merge-expand-result (m [(:entity-type %) (:id %)]) % xf) paging-states))))
+(defn grouped-batcher
+  "Create a batcher that groups by provided function. Returns batches of size n from
+  each group as it fills up. Group fn receives a PagingState, and it should return the group.
 
-(defn merge-results
-  "Updates paging states with the results, see merge-result fn."
-  [results paging-states]
-  (let [m (reduce (fn [m r] (assoc m [(:entity-type r) (:id r)] r)) {} results)]
-    (mapv #(merge-result (m [(:entity-type %) (:id %)]) %) paging-states)))
-
-(defn entity-type
-  "It returns entity-type of the first paging-state in the collection of paging states"
-  [paging-states]
-  (:entity-type (first paging-states)))
-
-(defn with-batcher
-  "Add batching configuration to engine map.
-
-  sorted? enables using sorted map instead of normal for keeping batches. This comes into play when
-  you have multiple unfinished batches and one needs to be picked for processing, with sorted map
-  the batches with lowest batch key go first.
-
-  max-items is the batch size. If pipeline stalls because no batches are available with max size, smaller
-  batches are issued.
-
-  batch-fn is the function to generate batch key from paging state map. Defaults to :entity-type"
-  ([engine sorted?] (with-batcher engine sorted? 1))
-  ([engine sorted? ^long max-items]
-   (with-batcher engine sorted? max-items :entity-type))
-  ([engine sorted? ^long max-items batch-fn]
-   (assoc engine :batcher
-                 {:m (if sorted? (sorted-map) {})
-                  :q PersistentQueue/EMPTY
-                  :max-items max-items
-                  :batch-fn batch-fn})))
-
-(defn with-result-buf
-  "The buffer size for the result channel."
-  [engine buf-size]
-  (assoc engine :buf-size buf-size))
-
-(defn with-concurrency
-  [engine concurrency]
-  (assoc engine :max-concurrency concurrency))
-
-(defn engine
-  "Defines a minimal map describing the paging engine. Use with-* to add more options.
-
-  runner-fn is a function of 2 args that takes a no-arg function and a result-ch. It should run
-  the function, usually in some async manner and push the result into result-ch. By default it does
-  work in future pool and blockingly pushes the result into result-ch.
-
-  Default buffer size for result channel is 100.
-  Default concurrency is 1, see with-concurrency docs for meaning of this setting."
-  ([] (engine 1))
-  ([concurrency] (engine concurrency impl/runner-fn))
-  ([concurrency runner-fn]
-   (-> {:runner-fn runner-fn}
-       (with-batcher false)
-       (with-result-buf 100)
-       (with-concurrency concurrency))))
-
-(defn paginate*!
-  "Returns a channel for inbound paging state maps and a channel where the
-  paging state maps are returns with additional keys of :items or :exception.
-
-  They are returned in the map as :in and :out keys respectively.
-
-  get-pages-fn takes paging-states coll and returns new updated paging-states coll,
-  use merge-result, merge-results functions to assist in updating paging states correctly with new
-  items."
-  [engine get-pages-fn]
-  (let [e (impl/init-engine engine get-pages-fn)]
-    (go-loop [{:keys [ch-out ch-in ch-result] :as engine} e]
-      ;; run from queue is the only queue -> actually executing path
-      (if-let [new-e (impl/run-from-queue! engine)]
-        (recur new-e)
-        (let [[v port] (alts! (remove nil? [ch-in ch-result (async/timeout 100)]))]
-          (condp = port
-            ch-in (recur (if v (impl/add-to-batch engine v) (assoc engine :ch-in nil)))
-            ch-result (if (:page-cursor v true)
-                        (recur (impl/add-to-batch engine v))
-                        (do (>! ch-out v) (recur engine)))
-            (if (impl/finished? engine)
-              (close! ch-out)
-              (recur (impl/force-enqueue engine)))))))
-    {:in (:ch-in e)
-     :out (:ch-out e)}))
-
-(defn paging-state
-  "Returns a base data-structure that describes initial state in paging of results based on some entity.
-
-  Initially it doesn't have a :page-cursor key. If the key is present and nil, the entity is considered to
-  be finished caching."
-  [entity-type entity-id]
-  {:id entity-id
-   :entity-type entity-type
-   :pages 0
-   :items []})
-
-(defn throw-states-exceptions
-  "Throws any exceptions in the states given."
-  [states]
-  (let [[first-cause & other] (keep :exception states)]
-    (when-some [e (some-> first-cause ExecutionException.)]
-      (doseq [cause other]
-        (.addSuppressed e cause))
-      (throw e))))
+  Partial batch strategy can be nil or :min-batches of a map of factors."
+  ([group-fn batch-size] (grouped-batcher group-fn batch-size nil))
+  ([group-fn batch-size partial-batch-strategy] (batcher/grouped-batcher group-fn batch-size partial-batch-strategy)))
 
 (defn paginate!
-  "Loads pages with given entity-id pairs. Returns a vector of paging states.
-  Any exceptions are rethrown. entity-ids should be a coll of pairs of entity-type and id."
-  [engine get-pages-fn entity-ids]
-  (let [{result-ch :out ch-in :in} (paginate*! engine get-pages-fn)
-        _ (onto-chan! ch-in (mapv #(paging-state (first %) (second %)) entity-ids) true)
-
-        result-coll (<!! (async/into [] result-ch))]
-    (throw-states-exceptions result-coll)
-    result-coll))
-
-(defn paginate-coll!
-  "Loads pages with given IDs. Returns a vector of paging states. Any exceptions are rethrown."
-  [engine get-pages-fn entity-type ids]
-  (let [lookup (reduce #(assoc %1 [(:entity-type %2) (:id %2)] %2)
-                       {}
-                       (paginate! engine get-pages-fn (map #(vector entity-type %) ids)))]
-    (mapv #(lookup [entity-type %]) ids)))
-
-(defn paginate-coll-items!
-  "Loads pages with given IDs. Returns a vector of vectors of items. Any exceptions are rethrown."
-  [engine get-pages-fn entity-type ids]
-  (mapv :items (paginate-coll! engine get-pages-fn entity-type ids)))
+  "Paginates a collection of items using run-fn."
+  [run-fn {:keys [batcher pages? concurrency wrapped?] :as options} input]
+  (let [counters {:in-cnt (volatile! 0)}
+        batcher (cond (nil? batcher) (batcher/non-batcher)
+                      (integer? batcher) (batcher/grouped-batcher (constantly nil) batcher nil)
+                      :else batcher)
+        ;; if not lazy sequence, push items into batcher immediately and have nil in input to signal no more
+        preload? (or (not (instance? IPending input))
+                     (do (first input) (realized? input)))
+        options (merge options
+                       #::impl {:run-fn run-fn :batcher batcher :futs (ConcurrentLinkedQueue.)
+                                :input (volatile! (when-not preload? input)) :counters counters
+                                :results (PriorityBlockingQueue. 11 ^Comparator (fn [x y] (compare (:idx x) (:idx y))))
+                                :concurrency concurrency :pages? pages?})]
+    (when preload? (impl/finalize-result {:to-batch input} (assoc options ::impl/pages? false)))
+    (cond->> (impl/page-loop options 0)
+      (not wrapped?) (map impl/unwrap))))
 
 (defn paginate-one!
-  "Starts pagination on a single entity and returns items. It expects that there is only 1 result.
+  "Paginates one item, using run-fn. Returns a sequence of maps, one for each item with merged
+  properties from input into each.
 
-  get-item-fn should take 1 parameter, the sole paging state, with entity-type ::singleton, id nil"
-  [engine get-page-fn]
-  (-> (paginate! engine (fn [[s]] (get-page-fn s)) [[::singleton nil]]) first :items))
+  - input is a map, is converted to PagingState
+  - run-fn can return a PagingState, a map (which will be converted to paging state) or Future or IPending
+  - options: :paged?, if set to true the function returns a lazy sequence of PagingStates, one for each
+                      page as it gets loaded
+             :wrapped?, if set to true, PagingState is returned instead of the unwrapped form of item sequence"
+  ([input run-fn] (paginate-one! input run-fn {}))
+  ([input run-fn {:keys [pages? wrapped?] :as options}]
+   (if pages?
+     (let [res (impl/page-loop-solo input run-fn true)]
+       (cons (cond-> res (not wrapped?) impl/unwrap)
+             (when (:cursor res)
+               (lazy-seq (paginate-one! res run-fn options)))))
+     (loop [page-state input]
+       (let [res (impl/page-loop-solo page-state run-fn false)]
+         (if (:cursor res) (recur res) (cond-> res (not wrapped?) impl/unwrap)))))))

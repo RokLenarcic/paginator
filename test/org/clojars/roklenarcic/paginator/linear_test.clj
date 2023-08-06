@@ -25,28 +25,6 @@
             :offset (when (< (+ 2 offset) (count projects))
                       (+ 2 offset))}}))
 
-(deftest continuation-token-test
-  (is (= projects
-         (p/paginate-one! (p/engine)
-                          (fn [{:keys [page-cursor] :as s}]
-                            (p/merge-result
-                              (let [resp (get-projects "MY AUTH" page-cursor)]
-                                {:page-cursor (get-in resp [:headers "x-ms-continuationtoken"])
-                                 :items (-> resp :body :items)})
-                              s))))))
-
-(deftest offset-test
-  (is (= projects
-         (p/paginate-one!
-           (p/engine)
-           (fn [{:keys [page-cursor] :as s}]
-             (p/merge-result
-               (let [resp (get-projects-with-offset "MY AUTH" page-cursor)]
-                 {:page-cursor (get-in resp [:body :offset])
-                  :items (get-in resp [:body :items])})
-               s))))))
-
-
 (defn api-call [auth-token method url params]
   (let [offset (or (some->> url (re-find #"\?offset=(.*)") second Long/parseLong)
                    0)]
@@ -56,15 +34,30 @@
 
 (defn api-caller
   [auth-token method url params]
-  (fn [{:keys [page-cursor] :as s}]
-    (p/merge-result
-      (if page-cursor
-        (api-call auth-token :get page-cursor {})
-        (api-call auth-token method url params))
-      s)))
+  (fn [{:keys [cursor add-page] :as s}]
+    (let [{:keys [page-cursor items]} (if cursor
+                                        (api-call auth-token :get cursor {})
+                                        (api-call auth-token method url params))]
+      (add-page items page-cursor))))
+
+(deftest continuation-token-test
+  (is (= projects
+         (p/paginate-one!
+           {}
+           (fn [{:keys [cursor add-page] :as s}]
+             (let [resp (get-projects "MY AUTH" cursor)]
+               (add-page (-> resp :body :items)
+                         (get-in resp [:headers "x-ms-continuationtoken"]))))))))
+
+(deftest offset-test
+  (is (= projects
+         (p/paginate-one!
+           {}
+           (fn [{:keys [cursor add-page] :as s}]
+             (let [resp (get-projects-with-offset "MY AUTH" cursor)]
+               (add-page (get-in resp [:body :items])
+                         (get-in resp [:body :offset]))))))))
 
 (deftest api-call-test
   (is (= projects
-         (p/paginate-one!
-           (p/engine)
-           (api-caller  "X" :get "/projects" {})))))
+         (p/paginate-one! {} (api-caller "X" :get "/projects" {})))))

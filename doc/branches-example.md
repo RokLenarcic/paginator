@@ -1,6 +1,6 @@
 # Example: Listing branches via GitLab GraphQL
 
-You're trying to list all branches for 1000+ repositories by id via GitLab GraphQL API
+You're trying to list all branches for 200+ repositories by id via GitLab GraphQL API
 
 The API won't let you ask for more than 100 repositories at once, and the query complexity
 limit in this case brings that number down to 35. Each of these repositories
@@ -61,6 +61,7 @@ The response to that query looks like this:
 Here's some code:
 
 ```clojure
+(def branches-per-page 100)
 (defn branches [auth-token ids page]
   (let [q (format "query {
                             projects(first: %s,

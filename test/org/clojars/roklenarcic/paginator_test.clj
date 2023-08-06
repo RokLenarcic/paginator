@@ -1,28 +1,106 @@
 (ns org.clojars.roklenarcic.paginator-test
   (:require [clojure.test :refer :all]
-            [org.clojars.roklenarcic.paginator :as p]
-            [clj-http.client :as h]
-            [cheshire.core :as json])
-  (:import (java.util.concurrent Semaphore)))
+            [org.clojars.roklenarcic.paginator :as p])
+  (:import (clojure.lang ExceptionInfo)
+           (java.util.concurrent Semaphore)))
 
 (deftest concurrency-test
   (testing "concurrency is respected"
     (let [pages (atom 0)
           semaphore (Semaphore. 5)
-          engine (p/engine)
-          get-pages (fn [[s]]
+          get-pages (fn [{:keys [add-page] :as x}]
                       (when-not (.tryAcquire semaphore)
                         (throw (ex-info "Too many concurrent threads" {})))
                       (Thread/sleep 10)
                       (.release semaphore)
-                      (p/merge-result {:page-cursor (< (swap! pages inc) 100)} s))]
-      (is (= (repeat 10 []) (map :items (p/paginate-coll! (p/with-concurrency engine 5) get-pages :any (range 10)))))
-      (is (thrown? Exception (p/paginate-coll! (p/with-concurrency engine 10) get-pages :any (range 100)))))))
+                      (add-page [] (when (< (swap! pages inc) 200) true)))]
+      (is (= (repeat 10 []) (p/paginate! (p/async-fn get-pages 5) {} (map #(assoc nil :id %) (range 10)))))
+      (is (thrown? Exception (p/paginate! (p/async-fn get-pages 10) {} (map #(assoc nil :id %) (range 100))))))))
 
-(def accounts
+(defn get-from-vector
+  "Mock pages 2 items per page"
+  [v cursor]
+  (let [p (or cursor 0)]
+    {:body {:items (take 2 (drop p v))
+            :offset (when (< (+ 2 p) (count v))
+                      (+ 2 p))}}))
+
+(def projects-of-accounts
+  "Mock project accounts"
+  (mapv
+    #(mapv (fn [i] {:project (+ i (* 10 %)) :account %}) (range 10))
+    (range 100)))
+
+(defn projects-by-id
+  "Mock getting project accounts paginated"
+  [{:keys [cursor add-page account-id]}]
+  (let [{:keys [items offset]} (:body (get-from-vector (projects-of-accounts account-id) cursor))]
+    (add-page items offset)))
+
+(defn ret-for-acc
+  "Helper fn"
+  [acc-id]
+  (mapv #(assoc % :account-id acc-id) (projects-of-accounts acc-id)))
+
+(defn ret-for-acc-pages
+  "Helper fn"
+  [acc-id]
+  (let [ps (ret-for-acc acc-id)]
+    (map #(subvec ps % (+ 2 %)) (range 0 (count ps) 2))))
+
+(defn get-account-projects-by-id [account-id cursor]
+  (get-from-vector (projects-of-accounts account-id) cursor))
+
+(defn account-projects [{:keys [account-id add-page cursor]}]
+  (let [{:keys [items offset]} (:body (get-account-projects-by-id account-id cursor))]
+    (add-page items offset)))
+
+(defn multi-account-projects [page-states]
+  (mapv #(account-projects %) page-states))
+
+(deftest paginate-one-test
+  (testing "simple paginate one"
+    (is (= (ret-for-acc 0) (p/paginate-one! {:account-id 0} account-projects)))
+    (is (= (ret-for-acc 0) (p/paginate-one! {:account-id 0} #(future (account-projects %))))))
+  (testing "pages test"
+    (is (= (ret-for-acc-pages 0)
+           (vec (p/paginate-one! {:account-id 0} projects-by-id {:pages? true}))))))
+
+(deftest paginate-test
+  (let [all-accounts (map #(assoc {} :account-id %) (range 10))
+        all-ret (map ret-for-acc (range 10))
+        all-pages (mapcat ret-for-acc-pages (range 10))
+        sorted #(sort-by (comp (juxt :account-id :project) first) %)]
+    (testing "non-batched"
+      (is (= all-ret (p/paginate! account-projects {} all-accounts)))
+      (is (= all-ret (p/paginate! #(future (account-projects %)) {} all-accounts)))
+      (is (= all-pages (sorted (p/paginate! account-projects {:pages? true} all-accounts)))))
+    (testing "batched"
+      (is (= all-ret (p/paginate! multi-account-projects {:batcher 3} all-accounts)))
+      (is (= all-ret (p/paginate! #(future (multi-account-projects %)) {:batcher 3} all-accounts)))
+      (is (= (sorted all-pages)
+             (sorted (p/paginate! #(future (multi-account-projects %))
+                                  {:pages? true :batcher 3}
+                                  all-accounts)))))
+    (testing "group batched"
+      (is (= all-ret (p/paginate! multi-account-projects {:batcher (p/grouped-batcher (comp even? :idx) 3)} all-accounts)))
+      (is (= all-ret (p/paginate! #(future (multi-account-projects %)) {:batcher (p/grouped-batcher (comp even? :idx) 3)} all-accounts)))
+      (is (= (sorted all-pages)
+             (sorted (p/paginate! #(future (multi-account-projects %))
+                                  {:pages? true :batcher (p/grouped-batcher (comp even? :idx) 3)}
+                                  all-accounts)))))))
+
+(defn broken-function [x]
+  (throw (ex-info "No bueno" {:test 1})))
+
+(deftest exception-tests
+  (is (thrown? ExceptionInfo (p/paginate-one! {:account-id 0} #(future (broken-function %))))))
+
+
+                #_(def accounts
   [{:account-name "A"} {:account-name "B"} {:account-name "C"} {:account-name "D"} {:account-name "E"} {:account-name "F"}])
 
-(def repositories
+#_(def repositories
   {"A" [{:repo-name "A/1"} {:repo-name "A/2"} {:repo-name "A/3"} {:repo-name "A/4"} {:repo-name "A/5"}]
    "B" []
    "C" [{:repo-name "C/1"}]
@@ -30,26 +108,18 @@
    "E" [{:repo-name "E/1"} {:repo-name "E/2"}]
    "F" [{:repo-name "F/1"} {:repo-name "F/2"} {:repo-name "F/3"}]})
 
-(defn get-from-vector [v cursor]
-  (let [p (or cursor 0)]
-    {:body {:items (take 2 (drop p v))
-            :offset (when (< (+ 2 p) (count v))
-                      (+ 2 p))}}))
 
-(defn v-result [s v]
-  (p/merge-result {:page-cursor (-> v :body :offset) :items (-> v :body :items)} s))
-
-(defn get-accounts
-  [{:keys [page-cursor] :as s}]
-  (let [resp (get-from-vector accounts page-cursor)]
+#_(defn get-accounts
+  [{:keys [cursor add-page] :as s}]
+  (let [resp (get-from-vector accounts cursor)]
     (cons (v-result s resp)
           (->> resp :body :items (map #(p/paging-state ::account-repos (:account-name %)))))))
 
-(defn get-account-repos
+#_(defn get-account-repos
   [{:keys [page-cursor id] :as s}]
   (v-result s (get-from-vector (repositories id) page-cursor)))
 
-(deftest expanding-test
+#_(deftest expanding-test
   (testing "expands into multiple paging states"
     (is (= [{:entity-type :x
              :id 1
@@ -87,7 +157,7 @@
              [(p/paging-state :x 1) (p/paging-state :x 2)]
              (map #(p/paging-state :account %)))))))
 
-(deftest multi-entity-types-test
+#_(deftest multi-entity-types-test
   (testing "multiple entity types"
     (is (= [{:entity-type ::account-repos
              :id "B"
@@ -139,55 +209,4 @@
                                    ::account-repos (get-account-repos (first paging-states))))
                                [[::accounts nil]]))))))
 
-(def ids-per-page 35)
-(def branches-per-page 100)
 
-(defn branches [auth-token ids page]
-  (let [q (format "query {
-                            projects(first: %s,
-                                     ids: %s,
-                                     membership: true) {
-                                         pageInfo { hasNextPage, endCursor }
-                                         nodes {
-                                           id, name, visibility, httpUrlToRepo, fullPath
-                                           namespace {
-                                             id
-                                           }
-                                           repository { rootRef, branchNames(limit: %s, offset: %s, searchPattern: \"*\" )}
-                                         }
-                            }}"
-                  (count ids)
-                  (json/generate-string ids)
-                  branches-per-page
-                  (* branches-per-page page))]
-    (h/request
-      {:url "https://gitlab.com/api/graphql"
-       :content-type :json
-       :as :json
-       :oauth-token auth-token
-       :request-method :post
-       :form-params {:query q}})))
-
-(defn project-branches [auth-token paging-states]
-  (let [page (:page-cursor (first paging-states) 0)
-        b (branches auth-token (map :id paging-states) page)
-        nodes (get-in b [:body :data :projects :nodes])
-        results (mapv (fn [{:keys [id repository] :as node}]
-                        {:id id
-                         :entity-type :project-branches
-                         :project (update node :repository dissoc :branchNames)
-                         :page-cursor (when (>= (count (:branchNames repository)) branches-per-page)
-                                        (inc page))
-                         :items (:branchNames repository)})
-                      nodes)]
-    (p/merge-results results paging-states)))
-
-(def e2 (-> (p/engine)
-            (p/with-concurrency 5)
-            (p/with-batcher false ids-per-page :page-cursor)))
-
-(comment
-  (p/paginate!
-    e2
-    #(project-branches "" %)
-    (map #(vector :project-branches %) ids)))
