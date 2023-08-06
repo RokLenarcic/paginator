@@ -168,10 +168,6 @@ This uses a grouped batcher by type to make sure you get paging states of a part
 Pro is that everything happens in one paging process, so you can apply concurrency limits and such. Con is that
 it looks messier.
 
-## A more complex example
-
-[Listing branches via GitLab GraphQL API](doc/branches-example.md)
-
 # License
 
 Licensed under the term of the MIT License, see LICENSE.

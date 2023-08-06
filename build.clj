@@ -4,7 +4,7 @@
             [deps-deploy.deps-deploy :as deploy]
             [clojure.tools.deps :as t]))
 
-(def version (format "0.3.%s" (b/git-count-revs nil)))
+(def version (format "1.0.%s" (b/git-count-revs nil)))
 
 (defn create-opts [cli-opts aliases]
   (let [lib 'org.clojars.roklenarcic/paginator
@@ -20,7 +20,9 @@
 (defn clean [opts] (b/delete {:path "target"}) opts)
 
 (defn run-tests [opts]
-  (let [cmd (b/java-command (assoc (create-opts opts ["test"])
+  (let [opts (create-opts opts [:test])
+        cmd (b/java-command (assoc opts
+                              :jvm-opts (:jvm-opts (t/combine-aliases (:basis opts) [:test]))
                               :main 'clojure.main
                               :main-args ["-m" "cognitect.test-runner"]))
         {:keys [exit]} (b/process cmd)]
@@ -28,7 +30,7 @@
       (throw (ex-info "Tests failed" {})))
     opts))
 
-(defn create-jar [opts]
+(defn jar [opts]
   (let [{:keys [src-dirs resource-dirs] :as opts} (create-opts opts nil)]
     (b/write-pom opts)
     (b/copy-dir {:src-dirs (concat src-dirs resource-dirs)})
@@ -45,7 +47,7 @@
   (-> opts
       (run-tests)
       (clean)
-      (create-jar)))
+      (jar)))
 
 (defn deploy "Deploy the JAR to Clojars." [opts]
   (let [opts (create-opts opts nil)]
