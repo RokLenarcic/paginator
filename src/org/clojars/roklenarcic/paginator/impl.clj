@@ -29,10 +29,16 @@
           (:items p))
     p))
 
+(defn- unwrap-execution-exception
+  [^Throwable e]
+  (if (instance? ExecutionException e)
+    (recur (.getCause e))
+    e))
+
 (defn clean-stack-trace
-  "Return executionexception stacktrace with stack cleaned at the top"
+  "Return execution exception cause with stack trace cleaned at the top."
   [^Throwable ee]
-  (let [cause (.getCause ee)
+  (let [cause (unwrap-execution-exception ee)
         bottom-st (drop-while #(not= "clojure.core$deref" (.getClassName ^StackTraceElement %)) (.getStackTrace ee))]
     (.setStackTrace (or cause ee) (into-array StackTraceElement (concat (some-> cause (.getStackTrace)) bottom-st)))
     (or cause ee)))

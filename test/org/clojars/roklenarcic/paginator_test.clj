@@ -4,7 +4,7 @@
             [org.clojars.roklenarcic.paginator :as p]
             [org.clojars.roklenarcic.paginator.impl :as b])
   (:import (clojure.lang ExceptionInfo)
-           (java.util.concurrent Semaphore)))
+           (java.util.concurrent ExecutionException Semaphore)))
 
 (deftest concurrency-test
   (testing "concurrency is respected"
@@ -108,6 +108,19 @@
 
 (deftest exception-tests
   (is (thrown? ExceptionInfo (p/paginate-one! {:account-id 0} #(future (broken-function %)))))
+  (testing "paginate! unwraps async execution exceptions"
+    (try
+      (doall (p/paginate! (p/async-fn broken-function 1) {} [{:account-id 0}]))
+      (is false "Expected async exception")
+      (catch ExceptionInfo e
+        (is (= {:test 1} (ex-data e))))))
+  (testing "paginate! unwraps nested execution exceptions"
+    (let [inner (ex-info "No bueno" {:test 1})]
+      (try
+        (doall (p/paginate! (constantly (future (throw (ExecutionException. inner)))) {} [{:account-id 0}]))
+        (is false "Expected async exception")
+        (catch ExceptionInfo e
+          (is (= {:test 1} (ex-data e)))))))
   ;; don't let people replace needed keys
   (is (thrown? ExceptionInfo (p/paginate-one! {:idx 0} identity)))
   ;; don't let people replace needed keys
